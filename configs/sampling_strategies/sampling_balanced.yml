@@ -1,0 +1,139 @@
+# 模型配置
+model:
+  # 模型检查点文件路径（预训练模型权重）
+  checkpoint: ./pretrained_models/pretrained_diffusion.pt
+  
+  # 强制指定模型类型（可选值：'diffdynamic' 等）
+  force_model_type: diffdynamic
+  
+  # 梯度融合参数配置（用于平衡全局和局部梯度信息）
+  grad_fusion_lambda:
+    # 最终 lambda 值（采样后期更依赖局部梯度，但保持一定全局信息）
+    end: 0
+    # 调度模式（可选值：'linear' 线性衰减, 'exponential' 指数衰减, 'adaptive' 自适应, 'time' 线性升权, 'quadratic' 二次衰减）
+    mode: quadratic
+    # 二次衰减的幂次（仅在 mode='quadratic' 时使用）
+    power: 2.0
+    # 初始 lambda 值（采样初期更依赖全局梯度，但保留局部信息）
+    start: 1
+  
+  # 是否启用梯度融合（可选值：true, false）
+  use_grad_fusion: true
+
+# 采样配置
+sample:
+  # 坐标中心化模式（可选值：'none' 不进行中心化, 'protein' 以蛋白几何中心进行平移）
+  center_pos_mode: protein
+  
+  # 分子对接配置
+  docking:
+    # 对接后端（可选值：'vina_python' 使用 Python Vina API, 其他可能的值：'qvina' 等）
+    backend: vina_python
+    # 是否在采样时自动执行对接评估（可选值：true, false。推荐设为 false，使用批量评估脚本统一评估）
+    enable: false
+    # 临时文件目录（null 表示使用系统默认临时目录）
+    tmp_dir: null
+    # Vina 搜索强度（数值越大搜索越彻底，但耗时更长，通常范围：1-32）
+    vina_exhaustiveness: 8
+    # 生成的对接姿势数量（每个配体生成的候选姿势数）
+    vina_poses: 1
+  
+  # 动态采样配置
+  dynamic:
+    # 阶段边界时间步（大步阶段结束/精炼阶段开始的时间点，统一控制两个阶段的边界，通常小于 num_steps）
+    # 对于 num_steps=1000，推荐范围：300-800
+    # 实际长度 = (大步阶段采样点数 × LSstepsize) + (精炼阶段采样点数 × RFstepsize)
+    time_boundary: 600      # 平衡策略：中等精炼阶段，总步数约70，实际长度约19.95
+    
+    # 大步探索阶段配置（用于快速探索构象空间，从 num_steps-1 到 time_boundary）
+    large_step:
+      # 批次大小（每次处理的样本数）
+      batch_size: 16
+      # Lambda 调度参数 a（仅在 schedule='lambda' 时使用，控制自适应步长的系数）
+      lambda_coeff_a: 30.0          # 平衡跳步：控制步数以获得合适实际长度
+      # Lambda 调度参数 b（仅在 schedule='lambda' 时使用，控制自适应步长的偏移）
+      lambda_coeff_b: 18.0          # 稳定的LS参数
+      # 线性调度下限步长（仅在 schedule='linear' 时使用，最后一步的跳步步长）
+      linear_step_lower: 18
+      # 线性调度上限步长（仅在 schedule='linear' 时使用，第一步的跳步步长）
+      linear_step_upper: 18
+      # 重复采样次数（每个时间步重复采样的次数）
+      n_repeat: 1
+      # 噪声缩放因子（添加额外噪声的强度，0.0 表示不添加噪声）
+      noise_scale: 0            # 无变化
+      # 调度策略（可选值：'lambda' 自适应调度, 'linear' 线性调度, 'fixed' 或其他固定值表示固定步长）
+      schedule: lambda
+      # 更新步幅（控制每次更新的幅度，通常范围：0.1-2.0）
+      step_size: 0.45       # 黄金比例步长
+      # 固定步长间隔（仅在 schedule='fixed' 或非 lambda/linear 时使用）
+      stride: 20
+      # 是否使用自适应步长（可选值：true, false）
+      use_adaptive_step: true
+      # 是否启用时间步对步长的乘算（可选值：true, false。time_scale_factor = sqrt(n)，n 为时间步）
+      use_time_scale: false
+    
+    # 动态采样方法（可选值：'auto' 自动选择策略, 'unified' 统一动态采样, 'legacy' 传统动态采样）
+    method: auto
+    
+    # 精炼阶段配置（用于精细优化分子结构，从 time_boundary 到 0）
+    refine:
+      # 精炼循环次数（重复精炼的次数）
+      cycles: 1
+      # Lambda 调度参数 a（仅在 schedule='lambda' 时使用）
+      lambda_coeff_a: 22.0          # 平衡精炼：控制步数以获得合适实际长度
+      # Lambda 调度参数 b（仅在 schedule='lambda' 时使用）
+      lambda_coeff_b: 5.0           # 稳定的RF参数
+      # 线性调度下限步长（仅在 schedule='linear' 时使用）
+      linear_step_lower: 4
+      # 线性调度上限步长（仅在 schedule='linear' 时使用）
+      linear_step_upper: 10
+      # 每次循环的采样次数
+      n_sampling: 1
+      # 噪声缩放因子（精炼阶段通常使用较小的噪声，如 0.1）
+      noise_scale: 0.05          # 经验最优噪声
+      # 调度策略（可选值：'lambda' 自适应调度, 'linear' 线性调度, 'fixed' 或其他固定值）
+      schedule: lambda
+      # 更新步幅（精炼阶段通常使用较小的步幅，如 0.2-1.0）
+      step_size: 0.25       # 配合LS步长的RF步长
+      # 固定步长间隔（仅在 schedule='fixed' 或非 lambda/linear 时使用）
+      stride: 6
+      # 下限时间步（精炼阶段结束的时间步，通常为 0）
+      time_lower: 0
+      # 是否使用自适应步长（可选值：true, false）
+      use_adaptive_step: true
+      # 是否启用时间步对步长的乘算（可选值：true, false）
+      use_time_scale: false
+    
+    # 候选筛选器配置（用于从生成的候选分子中选择最优样本）
+    selector:
+      # 是否启用候选筛选（可选值：true, false）
+      enable_selection: false
+      # 最大合成可及性分数（SA score 上限，通常范围：1.0-10.0，值越小表示越容易合成）
+      max_sa: 6.0
+      # 最小药物相似性分数（QED score 下限，范围：0.0-1.0，值越大表示越像药物）
+      min_qed: 0.0
+      # QED 权重（在综合评分中 QED 的权重）
+      qed_weight: 1.0
+      # SA 权重（在综合评分中 SA 的权重）
+      sa_weight: 1.0
+      # 选择前 N 个最优候选（从生成的样本中选择 top_n 个）
+      top_n: 16
+  
+  # 采样模式（可选值：'baseline' 基线模式, 'dynamic' 动态采样模式）
+  mode: dynamic
+  
+  # 生成样本数量（每个蛋白口袋生成的配体分子数量）
+  num_samples: 200
+  
+  # 扩散时间步数（扩散过程的步数，通常为 1000）
+  num_steps: 1000
+  
+  # 是否仅采样位置（可选值：true 仅生成原子位置, false 同时生成位置和原子类型）
+  pos_only: false
+  
+  # 原子数量采样策略（可选值：'prior' 根据口袋尺寸采样, 'range' 按序递增原子数量, 'ref' 使用参考配体的原子数）
+  sample_num_atoms: prior
+  
+  # 随机种子（用于保证结果可复现）
+  seed: 2021
+

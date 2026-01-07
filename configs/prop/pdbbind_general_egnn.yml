@@ -1,0 +1,39 @@
+model:  # 性质预测模型配置
+  hidden_channels: 256  # 编码器隐藏维度
+  encoder:
+    name: egnn  # 使用 EGNN 编码器
+    num_layers: 6
+    hidden_dim: 256
+    edge_dim: 0
+    num_r_gaussian: 64
+    act_fn: relu
+    norm: False
+    cutoff: 10.0
+    knn: 48 # kNN Graph
+
+train:  # 训练过程参数
+  seed: 2021
+  batch_size: 4
+  num_workers: 4
+  max_epochs: 200
+  report_iter: 200
+  val_freq: 1
+  pos_noise_std: 0.1
+  max_grad_norm: 10.
+  optimizer:
+    type: adam
+    lr: 1.e-4
+    weight_decay: 0
+    beta1: 0.99
+    beta2: 0.999
+  scheduler:
+    type: plateau
+    factor: 0.6
+    patience: 10
+    min_lr: 1.e-5
+
+dataset:  # 数据集信息
+  name: pdbbind
+  heavy_only: True  # 只使用重原子
+  path: ./data/pdbbind_v2020/pocket_10_general
+  split: ./data/pdbbind_v2020/pocket_10_general/split.pt

@@ -1,0 +1,90 @@
+model:  # 推断时使用的模型配置
+  checkpoint: ./pretrained_models/pretrained_GlintDM.pt
+  # 以下参数会覆盖检查点中的配置（如果提供）
+  force_model_type: diffdynamic  # 强制指定模型类型：'diffdynamic' 或 'scoreposnet3d'（如果检查点中的 model.name 不匹配，使用此选项强制指定）
+  use_grad_fusion: true  # 是否启用梯度融合（默认从检查点读取）
+  grad_fusion_lambda:  # 梯度融合系数或调度策略（默认从检查点读取）
+    mode: quadratic  # 调度模式：'linear', 'exponential', 'adaptive', 'time', 'quadratic'
+    start: 1    # 初始 lambda 值（更依赖全局梯度，但不完全依赖，避免结构不稳定）
+    end: 0    # 最终 lambda 值（更依赖局部梯度，但保持一定全局信息，避免过度优化）
+    power: 2.0  # 衰减指数（仅用于 quadratic 模式）：1.0=线性，2.0=二次，3.0=三次，>2.0=前期更稳定后期更快释放
+
+sample:  # 采样阶段的参数设置
+  seed: 2021  # 随机种子，保证结果可复现
+  num_samples: 200  # 生成样本数量
+  num_steps: 1000  # 扩散步数
+  pos_only: False  # 是否仅更新坐标
+  center_pos_mode: protein  # 采样时的中心化策略
+  sample_num_atoms: prior  # 原子数量来源（先验或预测）
+  mode: dynamic  # 采样模式（支持 dynamic/legacy 等）
+  dynamic:  # 动态采样的细节配置
+    method: auto  # ['auto', 'unified', 'legacy'] 自动选择策略（如果模型不支持unified会自动使用legacy）
+    large_step:  # 大步探索阶段配置
+      schedule: lambda  # 步长调度类型：'lambda'（自适应）、'linear'（线性函数 f=ax+b）、其他值（固定步长）
+      batch_size: 8 # 每轮处理的候选数量（针对16GB显存优化，从32降至16）
+      stride: 15  # 时间步之间的间隔（仅在 schedullambdae 不为 'lambda' 或 'linear' 时使用）
+      step_size: 1  # 更新步幅（减小以避免分子断连，原来是1.0）
+      n_repeat: 2  # 重复次数
+      noise_scale: 0.0  # 额外噪声强度
+      time_lower: 700  # 大步阶段的下限时间步（上限为扩散总步数-1，即 999）
+      lambda_coeff_a: 80.0  # Lambda 调度参数 a（控制跳跃步长，仅在 schedule='lambda' 时使用）
+      lambda_coeff_b: 20.0  # Lambda 调度参数 b（控制最小步长，仅在 schedule='lambda' 时使用）
+      linear_step_upper: 30.0  # 线性调度步长上限（仅在 schedule='linear' 时使用）
+                                 # 第一步的跳步步长，程序自动计算系数 a = 上限 - 下限
+      linear_step_lower: 20.0  # 线性调度步长下限（仅在 schedule='linear' 时使用）
+                                 # 最后一步的跳步步长
+      # 程序会自动计算：linear_coeff_a = 上限 - 下限 = 30 - 20 = 10
+      #                 linear_coeff_b = 下限 = 20
+      # 步长计算公式：step_size = a * progress + b
+      # 其中 progress = 剩余时间范围 / 初始时间范围（从1.0到0.0）
+      # - 第一步（progress=1.0）：step_size = 10 + 20 = 30（上限）
+      # - 最后一步（progress=0.0）：step_size = 20（下限）
+      # 
+      # 向后兼容：如果设置了 linear_coeff_a 和 linear_coeff_b，将优先使用它们
+      # 
+      # 时间调度示例：
+      # - lambda: 999→899→807→722→644→600（共 6 步，自适应步长）
+      # - linear (上限=30, 下限=20): 999→969→939→...→750（步长从30线性递减到20）
+      # - fixed: 999→984→969→...→750（固定 stride=15，约 17 步）
+    refine:  # 精炼阶段配置
+      schedule: lambda  # 调度类型：'lambda'（自适应）、'linear'（线性函数 f=ax+b）、其他值（固定步长）
+      stride: 8  # 时间步间隔（仅在 schedule 不为 'lambda' 或 'linear' 时使用）
+      step_size: 0.2  # 精炼步幅
+      time_upper: 700  # 精炼阶段的上限时间步（起始时间）
+      time_lower: 0  # 精炼阶段的下限时间步（结束时间）
+      cycles: 1  # 重复精炼的轮数
+      n_sampling: 4  # 精炼阶段采样次数（针对16GB显存优化，从3降至2）
+      noise_scale: 0.1  # 额外噪声
+      lambda_coeff_a: 40.0  # Lambda 调度参数 a（精炼阶段较小步长，仅在 schedule='lambda' 时使用）
+      lambda_coeff_b: 5.0  # Lambda 调度参数 b（精炼阶段最小步长，仅在 schedule='lambda' 时使用）
+      linear_step_upper: 20.0  # 线性调度步长上限（仅在 schedule='linear' 时使用）
+                                 # 第一步的跳步步长
+      linear_step_lower: 5.0    # 线性调度步长下限（仅在 schedule='linear' 时使用）
+                                 # 最后一步的跳步步长
+      # 程序会自动计算：linear_coeff_a = 上限 - 下限 = 15 - 5 = 10
+      #                 linear_coeff_b = 下限 = 5
+      # 
+      # 步长计算公式：step_size = a * progress + b
+      # 其中 progress = 剩余时间范围 / 初始时间范围（从1.0到0.0）
+      # - 第一步（progress=1.0）：step_size = 10 + 5 = 15（上限）
+      # - 最后一步（progress=0.0）：step_size = 5（下限）
+      # 
+      # 向后兼容：如果设置了 linear_coeff_a 和 linear_coeff_b，将优先使用它们
+      # 时间调度示例：
+      # - lambda: 750→…→5→0（约 44 步，自适应步长）
+      # - linear (a=10, b=5): 750→745→740→...→5→0（步长从15线性递减到5）
+      # - fixed: 750→742→734→...→6→0（固定 stride=8，约 94 步）
+    selector:  # 候选筛选策略
+      enable_selection: false  # 是否开启中途筛选（true: 使用top_n筛选候选；false: 保留所有候选）
+      top_n: 16  # 保留的候选数量（仅在enable_selection=true时生效）
+      min_qed: 0.0  # 最小 QED 阈值
+      max_sa: 6.0  # 最大 SA 分数
+      qed_weight: 1.0  # QED 权重
+      sa_weight: 1.0  # SA 权重
+
+  docking:  # 采样后自动对接的配置
+    enable: false   # 是否执行自动对接（设为false后，使用batch_sample_all.py --run_eval统一评估）
+    backend: vina_python  # 使用AutoDock Vina Python接口
+    tmp_dir: null  # 临时目录（默认在当前 result_path 下创建独立目录）
+    vina_exhaustiveness: 8  # Vina 搜索强度（与docking_vina.py一致，默认8）
+    vina_poses: 1  # Vina 输出姿势数量（仅在 backend=vina_python 时生效）

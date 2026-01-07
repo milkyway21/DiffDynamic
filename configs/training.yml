@@ -1,0 +1,80 @@
+data:  # 数据集配置
+  name: pl  # 使用口袋-配体数据集
+  path: ./data/crossdocked_v1.1_rmsd1.0_pocket10  # 数据根路径
+  split: ./data/crossdocked_pocket10_pose_split.pt  # 数据划分索引
+  transform:  # 数据增广设置
+    ligand_atom_mode: add_aromatic  # 配体原子特征模式
+    random_rot: False  # 是否随机旋转
+
+model:  # 模型与扩散配置
+  name: score
+  model_mean_type: C0  # ['noise', 'C0'] 预测坐标均值
+  beta_schedule: sigmoid  # 扩散 beta 调度
+  beta_start: 1.e-7
+  beta_end: 2.e-3
+  v_beta_schedule: cosine  # 离散类别扩散调度
+  v_beta_s: 0.01
+  num_diffusion_timesteps: 1000  # 扩散步数
+  loss_v_weight: 100.  # 分类损失权重
+  sample_time_method: symmetric  # ['importance', 'symmetric']
+
+  time_emb_dim: 0  # 时间嵌入维度
+  time_emb_mode: simple  # 时间嵌入方式
+  center_pos_mode: protein  # 训练阶段中心化模式
+  ligand_v_input: auto  # 配体类型输入模式 (auto/log_prob/logits/prob)
+  use_grad_fusion: false  # 是否启用梯度融合
+  grad_fusion_lambda: 0.5  # 梯度融合参数
+  loss_v2_weight: 0.0  # 额外类别损失权重
+  dynamic_pos_step_clip: null  # 坐标梯度裁剪
+  dynamic_v_step_clip: null  # 类别梯度裁剪
+  dynamic_large_step:
+    stride: 50
+    step_size: 1.0
+    noise_scale: 0.0
+  dynamic_refine:
+    stride: 10
+    step_size: 0.2
+    noise_scale: 0.0
+    time_upper: 200
+
+  node_indicator: True  # 是否追加节点指示位
+  model_type: uni_o2  # 采用 UniTransformer O2
+  num_blocks: 1  # 堆叠块数
+  num_layers: 9  # 每块层数
+  hidden_dim: 128  # 隐藏维度
+  n_heads: 16  # 注意力头数
+  edge_feat_dim: 4  # 边特征维度
+  num_r_gaussian: 20  # 距离高斯展开基数
+  knn: 32 # !
+  num_node_types: 8  # 节点类型数量
+  act_fn: relu  # 激活函数
+  norm: True  # 是否使用归一化
+  cutoff_mode: knn  # [radius, none] 图构建方式
+  ew_net_type: global  # [r, m, none] 边权网络类型
+  num_x2h: 1  # 每层 x2h 子层数
+  num_h2x: 1  # 每层 h2x 子层数
+  r_max: 10.
+  x2h_out_fc: False  # 是否在 x2h 后使用额外 MLP
+  sync_twoup: False  # 是否同步更新隐藏特征
+
+train:  # 训练超参数
+  seed: 2021
+  batch_size: 4
+  num_workers: 4
+  n_acc_batch: 1
+  max_iters: 10000000
+  val_freq: 100
+  pos_noise_std: 0.1
+  max_grad_norm: 8.0
+  bond_loss_weight: 1.0
+  optimizer:
+    type: adam
+    lr: 5.e-4
+    weight_decay: 0
+    beta1: 0.95
+    beta2: 0.999
+  scheduler:
+    type: plateau
+    factor: 0.6
+    patience: 10
+    min_lr: 1.e-6

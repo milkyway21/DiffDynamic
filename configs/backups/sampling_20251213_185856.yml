@@ -1,0 +1,57 @@
+model:
+  checkpoint: ./pretrained_models/pretrained_GlintDM.pt
+  force_model_type: diffdynamic
+  grad_fusion_lambda:
+    end: 0
+    mode: quadratic
+    power: 2.0
+    start: 1
+  use_grad_fusion: true
+sample:
+  center_pos_mode: protein
+  docking:
+    backend: vina_python
+    enable: false
+    tmp_dir: null
+    vina_exhaustiveness: 8
+    vina_poses: 1
+  dynamic:
+    large_step:
+      batch_size: 8
+      lambda_coeff_a: 80.0
+      lambda_coeff_b: 20.0
+      linear_step_lower: 20.0
+      linear_step_upper: 30.0
+      n_repeat: 2
+      noise_scale: 0.0
+      schedule: lambda
+      step_size: 1
+      stride: 15
+      time_lower: 500
+    method: auto
+    refine:
+      cycles: 1
+      lambda_coeff_a: 40.0
+      lambda_coeff_b: 5.0
+      linear_step_lower: 5.0
+      linear_step_upper: 20.0
+      n_sampling: 4
+      noise_scale: 0.1
+      schedule: lambda
+      step_size: 0.2
+      stride: 8
+      time_lower: 0
+      time_upper: 500
+    selector:
+      enable_selection: false
+      max_sa: 6.0
+      min_qed: 0.0
+      qed_weight: 1.0
+      sa_weight: 1.0
+      top_n: 16
+  mode: dynamic
+  num_samples: 200
+  num_steps: 1000
+  pos_only: false
+  sample_num_atoms: prior
+  seed: 2021
