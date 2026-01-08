@@ -11,7 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-REPO_URL = "https://github.com/milkyway21/DIffDynamic.git"
+REPO_URL = "https://github.com/milkyway21/DiffDynamic.git"
 REPO_DIR = Path(__file__).parent.absolute()
 
 def run_command(cmd, check=True, capture_output=False):
@@ -162,13 +162,62 @@ def main():
         print(f"  时间: {timestamp}")
         print("=" * 50)
     except Exception as e:
+        error_msg = str(e)
         print()
         print("=" * 50)
-        print("⚠ 推送失败，可能需要手动处理")
-        print("  请检查网络连接和 GitHub 权限")
-        print(f"  错误信息: {e}")
+        print("⚠ 推送失败")
+        print("-" * 50)
+        
+        if "gnutls_handshake" in error_msg or "TLS" in error_msg:
+            print("检测到 TLS/SSL 连接问题，可能的原因：")
+            print("  1. 网络连接不稳定或代理配置问题")
+            print("  2. 防火墙阻止了连接")
+            print("  3. GitHub 服务器暂时不可用")
+            print()
+            print("解决方案：")
+            print("  方案1: 使用 Personal Access Token")
+            print("    1. 访问 https://github.com/settings/tokens 创建 token")
+            print("    2. 运行: ./push_with_token.sh YOUR_TOKEN")
+            print()
+            print("  方案2: 配置 SSH 密钥（推荐）")
+            print("    运行: ./setup_ssh.sh")
+            print("    然后: git remote set-url origin git@github.com:milkyway21/DIffDynamic.git")
+            print("    最后: git push -u origin master")
+            print()
+            print("  方案3: 稍后重试或手动推送")
+            print("    git push -u origin master")
+        elif "Permission denied" in error_msg or "publickey" in error_msg:
+            print("检测到 SSH 认证问题")
+            print()
+            print("解决方案：")
+            print("  方案1: 配置 SSH 密钥（推荐）")
+            print("    运行: ./setup_ssh.sh")
+            print()
+            print("  方案2: 使用 HTTPS + Personal Access Token")
+            print("    1. 访问 https://github.com/settings/tokens 创建 token")
+            print("    2. 运行: git remote set-url origin https://github.com/milkyway21/DIffDynamic.git")
+            print("    3. 运行: ./push_with_token.sh YOUR_TOKEN")
+        elif "Username" in error_msg or "could not read Username" in error_msg:
+            print("需要 GitHub 认证")
+            print()
+            print("解决方案：")
+            print("  方案1: 使用 Personal Access Token")
+            print("    1. 访问 https://github.com/settings/tokens 创建 token")
+            print("    2. 运行: ./push_with_token.sh YOUR_TOKEN")
+            print()
+            print("  方案2: 配置 SSH 密钥")
+            print("    运行: ./setup_ssh.sh")
+        elif "timeout" in error_msg.lower():
+            print("推送操作超时，请检查网络连接后重试")
+        else:
+            print(f"错误信息: {error_msg}")
+            print("请检查网络连接和 GitHub 权限")
+        
+        print()
+        print("提示: 代码已成功提交到本地仓库，可以稍后手动推送")
         print("=" * 50)
-        sys.exit(1)
+        # 不退出，让用户知道代码已经提交了
+        return
 
 if __name__ == "__main__":
     main()
