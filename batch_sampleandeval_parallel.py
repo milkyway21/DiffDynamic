@@ -1615,6 +1615,293 @@ def load_config_to_dataframe(config_file):
         return None
 
 
+def parse_filename_params(filename):
+    """
+    从文件名解析参数
+    
+    示例文件名: batch_evaluation_summary_20260105_002424_gfquadratic_1_0_tl800_lslambda_60p0_20p0_lsstep_0p6_lsnoise_0p0_rflambda_10p0_5p0_rfstep_0p25_rfnoise_0p05.xlsx
+    
+    返回参数字典
+    """
+    params = {}
+    filename_str = str(filename) if isinstance(filename, Path) else filename
+    
+    # 提取权重策略 (gfquadratic -> quadratic)
+    gf_match = re.search(r'gf(\w+)', filename_str)
+    if gf_match:
+        params['权重策略'] = gf_match.group(1)
+    
+    # 提取开始权重和结束权重 (gfquadratic_1_0 -> 开始权重=1, 结束权重=0)
+    weight_match = re.search(r'gf\w+_(\d+)_(\d+)', filename_str)
+    if weight_match:
+        params['开始权重'] = float(weight_match.group(1))
+        params['结束权重'] = float(weight_match.group(2))
+    
+    # 提取时间长度 (tl800 -> 800)
+    tl_match = re.search(r'tl(\d+)', filename_str)
+    if tl_match:
+        params['时间长度 (TL)'] = int(tl_match.group(1))
+    
+    # 提取LS Lambda值 (lslambda_60p0_20p0 -> LSLambda1=60.0, LSLambda2=20.0)
+    ls_lambda_match = re.search(r'lslambda_(\d+p\d+)_(\d+p\d+)', filename_str)
+    if ls_lambda_match:
+        params['LSLambda1'] = float(ls_lambda_match.group(1).replace('p', '.'))
+        params['LSLambda2'] = float(ls_lambda_match.group(2).replace('p', '.'))
+    
+    # 提取LS step size (lsstep_0p6 -> 0.6)
+    ls_step_match = re.search(r'lsstep_(\d+p\d+)', filename_str)
+    if ls_step_match:
+        params['LSstepsize'] = float(ls_step_match.group(1).replace('p', '.'))
+    
+    # 提取LS noise (lsnoise_0p0 -> 0.0)
+    ls_noise_match = re.search(r'lsnoise_(\d+p\d+)', filename_str)
+    if ls_noise_match:
+        params['LSnosie'] = float(ls_noise_match.group(1).replace('p', '.'))
+    
+    # 提取RF Lambda值 (rflambda_10p0_5p0 -> RFLambda1=10.0, RFLambda2=5.0)
+    rf_lambda_match = re.search(r'rflambda_(\d+p\d+)_(\d+p\d+)', filename_str)
+    if rf_lambda_match:
+        params['RFLambda1'] = float(rf_lambda_match.group(1).replace('p', '.'))
+        params['RFLambda2'] = float(rf_lambda_match.group(2).replace('p', '.'))
+    
+    # 提取RF step size (rfstep_0p25 -> 0.25)
+    rf_step_match = re.search(r'rfstep_(\d+p\d+)', filename_str)
+    if rf_step_match:
+        params['RFstepsize'] = float(rf_step_match.group(1).replace('p', '.'))
+    
+    # 提取RF noise (rfnoise_0p05 -> 0.05)
+    rf_noise_match = re.search(r'rfnoise_(\d+p\d+)', filename_str)
+    if rf_noise_match:
+        params['RFnosie'] = float(rf_noise_match.group(1).replace('p', '.'))
+    
+    return params
+
+
+def append_to_merged_summary(excel_file, summary_stats, config_file=None):
+    """
+    将当前批次的数据追加到汇总Excel文件中
+    
+    Args:
+        excel_file: 刚保存的批次Excel文件路径
+        summary_stats: 汇总统计信息
+        config_file: 配置文件路径（用于提取配置参数）
+    """
+    if pd is None:
+        return
+    
+    try:
+        excel_file = Path(excel_file)
+        if not excel_file.exists():
+            return
+        
+        # 汇总Excel文件路径
+        batchsummary_dir = excel_file.parent
+        merged_summary_file = batchsummary_dir / 'merged_summary.xlsx'
+        
+        # 定义列的顺序
+        columns_order = [
+            '权重策略', '下降速率', '开始权重', '结束权重', '时间长度 (TL)',
+            'LSstepsize', 'LSnosie', 'LSLambda1', 'LSLambda2',
+            'RFstepsize', 'RFnosie', 'RFLambda1', 'RFLambda2',
+            '步数', '取模步长', '可重建率 (%)', '对接成功率 (%)',
+            'Vina_Dock 亲和力', 'Vina_ScoreOnly', 'Vina_Minimize',
+            'QED 评分（均值）', 'SA 评分（均值）'
+        ]
+        
+        # 从文件名解析参数
+        filename_params = parse_filename_params(excel_file.name)
+        
+        # 从Excel文件提取统计数据
+        try:
+            df_stats = pd.read_excel(excel_file, sheet_name='统计信息', engine='openpyxl')
+            stats_dict = {}
+            for _, row in df_stats.iterrows():
+                key = str(row['统计项目'])
+                value = row['数值']
+                # 尝试转换为数值类型
+                if isinstance(value, str):
+                    try:
+                        # 尝试转换为float
+                        value = float(value)
+                    except ValueError:
+                        pass
+                stats_dict[key] = value
+        except Exception:
+            stats_dict = {}
+        
+        # 从配置参数sheet提取数据
+        config_dict = {}
+        try:
+            df_config = pd.read_excel(excel_file, sheet_name='配置参数', engine='openpyxl')
+            for _, row in df_config.iterrows():
+                key = str(row['参数路径'])
+                value = row['参数值']
+                # 处理NaN值
+                if pd.isna(value):
+                    continue
+                config_dict[key] = value
+        except Exception:
+            # 如果配置参数sheet不存在或读取失败，尝试从config_file读取
+            if config_file:
+                try:
+                    config_df = load_config_to_dataframe(config_file)
+                    if config_df is not None and len(config_df) > 0:
+                        for _, row in config_df.iterrows():
+                            key = str(row['参数路径'])
+                            value = row['参数值']
+                            if pd.isna(value):
+                                continue
+                            config_dict[key] = value
+                except Exception:
+                    pass
+        
+        # 构建新行数据
+        row_data = {}
+        
+        # 从文件名参数获取（优先）
+        row_data.update(filename_params)
+        
+        # 从配置参数中获取（如果文件名中没有）
+        if '下降速率' not in row_data:
+            power = config_dict.get('model.grad_fusion_lambda.power', None)
+            if power is not None:
+                row_data['下降速率'] = float(power)
+        
+        if '步数' not in row_data:
+            steps = config_dict.get('计算.跳步总次数', None)
+            if steps is not None:
+                row_data['步数'] = int(steps)
+        
+        if '取模步长' not in row_data:
+            mod_step = config_dict.get('计算.实际长度', None)
+            if mod_step is not None:
+                row_data['取模步长'] = float(mod_step)
+        
+        # 从配置参数补充缺失的参数
+        if 'LSstepsize' not in row_data:
+            ls_step = config_dict.get('sample.dynamic.large_step.step_size', None)
+            if ls_step is not None:
+                row_data['LSstepsize'] = float(ls_step)
+        
+        if 'LSnosie' not in row_data:
+            ls_noise = config_dict.get('sample.dynamic.large_step.noise_scale', None)
+            if ls_noise is not None:
+                row_data['LSnosie'] = float(ls_noise)
+        
+        if 'LSLambda1' not in row_data:
+            ls_lambda_a = config_dict.get('sample.dynamic.large_step.lambda_coeff_a', None)
+            if ls_lambda_a is not None:
+                row_data['LSLambda1'] = float(ls_lambda_a)
+        
+        if 'LSLambda2' not in row_data:
+            ls_lambda_b = config_dict.get('sample.dynamic.large_step.lambda_coeff_b', None)
+            if ls_lambda_b is not None:
+                row_data['LSLambda2'] = float(ls_lambda_b)
+        
+        if 'RFstepsize' not in row_data:
+            rf_step = config_dict.get('sample.dynamic.refine.step_size', None)
+            if rf_step is not None:
+                row_data['RFstepsize'] = float(rf_step)
+        
+        if 'RFnosie' not in row_data:
+            rf_noise = config_dict.get('sample.dynamic.refine.noise_scale', None)
+            if rf_noise is not None:
+                row_data['RFnosie'] = float(rf_noise)
+        
+        if 'RFLambda1' not in row_data:
+            rf_lambda_a = config_dict.get('sample.dynamic.refine.lambda_coeff_a', None)
+            if rf_lambda_a is not None:
+                row_data['RFLambda1'] = float(rf_lambda_a)
+        
+        if 'RFLambda2' not in row_data:
+            rf_lambda_b = config_dict.get('sample.dynamic.refine.lambda_coeff_b', None)
+            if rf_lambda_b is not None:
+                row_data['RFLambda2'] = float(rf_lambda_b)
+        
+        if '时间长度 (TL)' not in row_data:
+            time_boundary = config_dict.get('sample.dynamic.time_boundary', None)
+            if time_boundary is not None:
+                row_data['时间长度 (TL)'] = int(time_boundary)
+        
+        if '权重策略' not in row_data:
+            mode = config_dict.get('model.grad_fusion_lambda.mode', None)
+            if mode is not None:
+                row_data['权重策略'] = str(mode)
+        
+        if '开始权重' not in row_data:
+            start = config_dict.get('model.grad_fusion_lambda.start', None)
+            if start is not None:
+                row_data['开始权重'] = float(start)
+        
+        if '结束权重' not in row_data:
+            end = config_dict.get('model.grad_fusion_lambda.end', None)
+            if end is not None:
+                row_data['结束权重'] = float(end)
+        
+        # 从统计信息中提取（安全转换）
+        def safe_float(value, default=0.0):
+            try:
+                if isinstance(value, str):
+                    return float(value)
+                return float(value) if value is not None else default
+            except (ValueError, TypeError):
+                return default
+        
+        row_data['可重建率 (%)'] = safe_float(stats_dict.get('重建成功百分比(%)', 0))
+        row_data['对接成功率 (%)'] = safe_float(stats_dict.get('对接成功百分比(%)', 0))
+        row_data['Vina_Dock 亲和力'] = safe_float(stats_dict.get('Vina_Dock_平均亲和力', 0))
+        row_data['Vina_ScoreOnly'] = safe_float(stats_dict.get('Vina_ScoreOnly_平均亲和力', 0))
+        row_data['Vina_Minimize'] = safe_float(stats_dict.get('Vina_Minimize_平均亲和力', 0))
+        row_data['QED 评分（均值）'] = safe_float(stats_dict.get('QED平均评分', 0))
+        row_data['SA 评分（均值）'] = safe_float(stats_dict.get('SA平均评分', 0))
+        
+        # 确保所有列都存在
+        new_row = {}
+        for col in columns_order:
+            new_row[col] = row_data.get(col, None)
+        # 添加文件名列
+        new_row['文件名'] = excel_file.name
+        
+        # 读取现有的汇总文件或创建新的
+        if merged_summary_file.exists():
+            try:
+                df_existing = pd.read_excel(merged_summary_file, engine='openpyxl')
+                # 检查是否已存在相同的记录（通过文件名判断）
+                if '文件名' in df_existing.columns:
+                    if excel_file.name in df_existing['文件名'].values:
+                        # 更新现有记录而不是追加
+                        idx = df_existing[df_existing['文件名'] == excel_file.name].index[0]
+                        for col in columns_order + ['文件名']:
+                            if col in df_existing.columns:
+                                df_existing.at[idx, col] = new_row.get(col)
+                        df_existing.to_excel(merged_summary_file, index=False, engine='openpyxl')
+                        print(f"✅ 已更新汇总Excel文件: {merged_summary_file.name}")
+                        return
+                # 追加新行
+                # 确保列顺序一致
+                all_columns = columns_order + ['文件名']
+                df_new = pd.DataFrame([new_row], columns=all_columns)
+                # 如果现有文件缺少某些列，补齐
+                for col in all_columns:
+                    if col not in df_existing.columns:
+                        df_existing[col] = None
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            except Exception as e:
+                print(f"⚠️  读取现有汇总文件失败，创建新文件: {e}")
+                df_combined = pd.DataFrame([new_row], columns=columns_order + ['文件名'])
+        else:
+            df_combined = pd.DataFrame([new_row], columns=columns_order + ['文件名'])
+        
+        # 保存汇总文件
+        df_combined.to_excel(merged_summary_file, index=False, engine='openpyxl')
+        print(f"✅ 已追加到汇总Excel文件: {merged_summary_file.name}")
+        
+    except Exception as e:
+        print(f"⚠️  追加到汇总Excel失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def save_molecules_to_excel(excel_file, molecule_records, summary_stats, batch_start_time, pocket_stats_list=None, config_file=None):
     """
     将所有对接成功的分子数据保存到Excel
@@ -1677,6 +1964,13 @@ def save_molecules_to_excel(excel_file, molecule_records, summary_stats, batch_s
                 config_df = load_config_to_dataframe(config_file)
                 if config_df is not None and len(config_df) > 0:
                     config_df.to_excel(writer, sheet_name='配置参数', index=False)
+        
+        # 保存成功后，自动追加到汇总Excel文件
+        try:
+            append_to_merged_summary(excel_file, summary_stats, config_file)
+        except Exception as e:
+            print(f"⚠️  追加到汇总Excel失败: {e}")
+            # 不影响主流程，只打印警告
         
         return True
         

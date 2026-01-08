@@ -8,11 +8,13 @@
 import os
 import subprocess
 import sys
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 REPO_URL = "https://github.com/milkyway21/DiffDynamic.git"
 REPO_DIR = Path(__file__).parent.absolute()
+BACKUP_DIR = REPO_DIR / "backups"
 
 def run_command(cmd, check=True, capture_output=False):
     """执行 shell 命令"""
@@ -40,12 +42,127 @@ def init_git_repo():
     if not is_git_repo():
         print("初始化 git 仓库...")
         run_command("git init")
-        run_command(f"git remote add origin {REPO_URL}", check=False)
+        # 优先使用 SSH 方式
+        ssh_url = REPO_URL.replace("https://github.com/", "git@github.com:").replace(".git", ".git")
+        run_command(f"git remote add origin {ssh_url}", check=False)
         print("Git 仓库初始化完成")
     else:
-        # 确保远程仓库 URL 正确
-        run_command(f"git remote set-url origin {REPO_URL}", check=False)
-        run_command(f"git remote add origin {REPO_URL}", check=False)
+        # 确保远程仓库 URL 正确（优先使用 SSH）
+        ssh_url = REPO_URL.replace("https://github.com/", "git@github.com:").replace(".git", ".git")
+        run_command(f"git remote set-url origin {ssh_url}", check=False)
+
+def cleanup_old_backups(keep_count=10):
+    """清理旧的备份文件，只保留最近的几个"""
+    if not BACKUP_DIR.exists():
+        return
+    
+    try:
+        # 获取所有备份文件
+        backup_files = []
+        for ext in ['.bundle', '.tar.gz']:
+            backup_files.extend(BACKUP_DIR.glob(f"backup_*{ext}"))
+        
+        # 按修改时间排序（最新的在前）
+        backup_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        # 删除超出保留数量的旧备份
+        if len(backup_files) > keep_count:
+            deleted_count = 0
+            for old_backup in backup_files[keep_count:]:
+                try:
+                    old_backup.unlink()
+                    deleted_count += 1
+                except:
+                    pass
+            if deleted_count > 0:
+                print(f"  已清理 {deleted_count} 个旧备份（保留最近 {keep_count} 个）")
+    except Exception as e:
+        # 清理失败不影响主流程
+        pass
+
+def create_local_backup():
+    """创建本地备份"""
+    # 创建备份目录
+    BACKUP_DIR.mkdir(exist_ok=True)
+    
+    # 生成备份文件名（带时间戳）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"backup_{timestamp}"
+    backup_path = BACKUP_DIR / backup_name
+    
+    print()
+    print("创建本地备份...")
+    print("-" * 50)
+    
+    try:
+        # 获取当前分支
+        branch = run_command("git branch --show-current", capture_output=True) or "master"
+        
+        # 使用 git bundle 创建完整的仓库备份（包含所有历史）
+        bundle_file = backup_path.with_suffix(".bundle")
+        run_command(f"git bundle create {bundle_file} {branch} --all", check=False)
+        
+        if bundle_file.exists():
+            bundle_size = bundle_file.stat().st_size / (1024 * 1024)  # MB
+            print(f"✓ Git bundle 备份已创建: {bundle_file.name}")
+            print(f"  大小: {bundle_size:.2f} MB")
+            print(f"  路径: {bundle_file}")
+            # 清理旧备份
+            cleanup_old_backups()
+        else:
+            print("⚠ Git bundle 备份创建失败，尝试创建压缩包备份...")
+            # 如果 bundle 失败，创建压缩包备份
+            create_tarball_backup(backup_path)
+            cleanup_old_backups()
+            
+    except Exception as e:
+        print(f"⚠ Git bundle 备份失败: {e}")
+        print("尝试创建压缩包备份...")
+        try:
+            create_tarball_backup(backup_path)
+            cleanup_old_backups()
+        except Exception as e2:
+            print(f"✗ 压缩包备份也失败: {e2}")
+            print("继续执行推送...")
+
+def create_tarball_backup(backup_path):
+    """创建 tar 压缩包备份"""
+    import tarfile
+    
+    # 排除不需要备份的目录和文件
+    exclude_patterns = [
+        '__pycache__', '.git', 'node_modules', '.venv', 'venv',
+        'data', 'outputs', 'pretrained_models', 'docktmp', 'batchsummary',
+        '*.xlsx', '*.xls', '*.pyc', '*.pyo'
+    ]
+    
+    tar_file = backup_path.with_suffix(".tar.gz")
+    
+    with tarfile.open(tar_file, "w:gz") as tar:
+        # 只备份 .py, .md, .yml 文件
+        for root, dirs, files in os.walk(REPO_DIR):
+            # 排除不需要的目录
+            dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules', 
+                                                     '.venv', 'venv', 'data', 'outputs', 
+                                                     'pretrained_models', 'docktmp', 'batchsummary'}]
+            
+            root_path = Path(root)
+            if any(exclude in root_path.parts for exclude in ['.git', '__pycache__', 'node_modules']):
+                continue
+                
+            for file in files:
+                file_path = root_path / file
+                if file_path.suffix.lower() in {'.py', '.md', '.yml', '.yaml'}:
+                    rel_path = file_path.relative_to(REPO_DIR)
+                    tar.add(file_path, arcname=rel_path)
+    
+    if tar_file.exists():
+        tar_size = tar_file.stat().st_size / (1024 * 1024)  # MB
+        print(f"✓ 压缩包备份已创建: {tar_file.name}")
+        print(f"  大小: {tar_size:.2f} MB")
+        print(f"  路径: {tar_file}")
+    else:
+        raise Exception("压缩包创建失败")
 
 def get_files_to_add():
     """获取需要添加的文件列表"""
@@ -140,6 +257,9 @@ def main():
         print(f"提交失败: {e}")
         print("可能没有变更需要提交")
         return
+    
+    # 创建本地备份（在推送之前）
+    create_local_backup()
     
     # 推送到 GitHub
     print()

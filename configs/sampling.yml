@@ -2,10 +2,10 @@ model:
   checkpoint: ./pretrained_models/pretrained_diffusion.pt
   force_model_type: diffdynamic
   grad_fusion_lambda:
-    end: 0
+    end: 0.0
     mode: quadratic
     power: 2.0
-    start: 1
+    start: 1.0
   use_grad_fusion: true
 sample:
   center_pos_mode: protein
@@ -16,31 +16,31 @@ sample:
     vina_exhaustiveness: 8
     vina_poses: 1
   dynamic:
-    time_boundary: 800
+    time_boundary: 750
     large_step:
       batch_size: 16
-      lambda_coeff_a: 60.0
+      lambda_coeff_a: 80.0
       lambda_coeff_b: 20.0
       linear_step_lower: 15
       linear_step_upper: 15
       n_repeat: 1
       noise_scale: 0
       schedule: lambda
-      step_size: 0.6
+      step_size: 1.02
       stride: 15
       use_adaptive_step: true
       use_time_scale: false
     method: auto
     refine:
       cycles: 1
-      lambda_coeff_a: 10.0
-      lambda_coeff_b: 5.0
+      lambda_coeff_a: 20.0
+      lambda_coeff_b: 2.0
       linear_step_lower: 3
       linear_step_upper: 8
       n_sampling: 1
-      noise_scale: 0.05
+      noise_scale: 0.1
       schedule: lambda
-      step_size: 0.25
+      step_size: 0.2
       stride: 5
       time_lower: 0
       use_adaptive_step: true
