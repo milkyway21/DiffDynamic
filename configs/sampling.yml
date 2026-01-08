@@ -46,12 +46,13 @@ sample:
       use_adaptive_step: true
       use_time_scale: false
     selector:
-      enable_selection: false
-      max_sa: 6.0
-      min_qed: 0.0
-      qed_weight: 1.0
-      sa_weight: 1.0
-      top_n: 16
+      enable_selection: true  # 开启候选筛选
+      selection_time: 250  # 筛选时间节点（在t=250时进行筛选，与time_boundary共存）
+      min_sa: 0.3  # SA最小下限（SA越大越好，范围[0,1]，值越大越易合成）
+      min_qed: 0.3  # QED最小下限（QED越大越好，范围[0,1]，值越大越像药物）
+      qed_weight: 1.0  # QED权重（在综合评分中QED的权重）
+      sa_weight: 1.0  # SA权重（在综合评分中SA的权重）
+      top_n: 16  # 选择前N个最优候选
   mode: dynamic
   num_samples: 200
   num_steps: 1000

@@ -447,7 +447,8 @@ def evaluate_candidate(pos_array, v_array, ligand_atom_mode, selector_cfg):  # �
                 score_value = float('inf')
                 status = 'metric_nan'
             else:
-                score_value = sa_weight * sa - qed_weight * qed  # 根据权重计算综合分数。
+                # SA和QED都越大越好，所以score = -(sa_weight * sa + qed_weight * qed)，score越小越好
+                score_value = -(sa_weight * sa + qed_weight * qed)  # 根据权重计算综合分数。
         else:
             status = 'mol_none'  # 重建返回空。
             metrics = {'qed': float('nan'), 'sa': float('inf')}
@@ -461,14 +462,18 @@ def evaluate_candidate(pos_array, v_array, ligand_atom_mode, selector_cfg):  # �
         score_value = float('inf')
 
     min_qed = selector_cfg.get('min_qed')  # QED 下限。
-    max_sa = selector_cfg.get('max_sa')  # SA 上限。
+    # SA越大越好，所以使用min_sa作为下限；为了向后兼容，也支持max_sa（但会转换为min_sa的语义）
+    min_sa = selector_cfg.get('min_sa')
+    max_sa = selector_cfg.get('max_sa')  # 向后兼容：如果配置了max_sa但没有min_sa，则使用max_sa作为min_sa
+    if min_sa is None and max_sa is not None:
+        min_sa = max_sa  # 向后兼容：将max_sa当作min_sa使用
     if metrics:
         qed = metrics.get('qed', float('nan'))
         sa = metrics.get('sa', float('inf'))
         if min_qed is not None and not np.isnan(qed) and qed < min_qed:  # 不满足 QED 下限则过滤。
             status = 'filtered_qed'
             score_value = float('inf')
-        if max_sa is not None and not np.isnan(sa) and sa > max_sa:  # 不满足 SA 上限则过滤。
+        if min_sa is not None and not np.isnan(sa) and sa < min_sa:  # 不满足 SA 下限则过滤（SA越大越好）。
             status = 'filtered_sa'
             score_value = float('inf')
 
@@ -528,6 +533,21 @@ def _run_legacy_dynamic(model, data, config, ligand_atom_mode, device='cuda:0', 
     large_cfg = dynamic_cfg.get('large_step', {})  # 大步探索阶段配置。
     refine_cfg = dynamic_cfg.get('refine', {})  # 精炼阶段配置。
     selector_cfg = dynamic_cfg.get('selector', {})  # 候选筛选配置。
+
+    # 读取时间节点配置：time_boundary 保留原有功能，selection_time 用于中间筛选
+    time_boundary = get_time_boundary(dynamic_cfg, 750)  # time_boundary 用于划分 large_step 和 refine
+    enable_selection = selector_cfg.get('enable_selection', False)
+    selection_time = selector_cfg.get('selection_time')
+    
+    # 确保 refine 使用 time_boundary（原有功能）
+    if 'time_upper' not in refine_cfg:
+        refine_cfg['time_upper'] = time_boundary
+    
+    if logger:
+        if enable_selection and selection_time is not None:
+            logger.info(f'[Selector] Selection enabled at t={selection_time}, time_boundary={time_boundary} (both coexist)')
+        else:
+            logger.info(f'[Selector] Using time_boundary={time_boundary} (selection disabled)')
 
     center_pos_mode = config.sample.get('center_pos_mode', 'protein')  # 坐标中心化策略。
     pos_only = config.sample.get('pos_only', False)  # 是否仅采样坐标。
@@ -948,25 +968,112 @@ def _run_legacy_dynamic(model, data, config, ligand_atom_mode, device='cuda:0', 
                 'repeat': repeat_idx,
                 'time_indices': res.get('time_indices'),
             }
-            metric_info = evaluate_candidate(pos_piece, v_piece, ligand_atom_mode, selector_cfg)
-            candidate.update(metric_info)  # 合并化学指标与评分。
+            # large_step阶段不进行筛选，只收集候选
             total_candidates.append(candidate)  # 收集候选。
 
-    # 根据 enable_selection 参数决定是否进行筛选
-    enable_selection = selector_cfg.get('enable_selection', True)  # 默认开启筛选
-    if enable_selection:
-        top_n = selector_cfg.get('top_n', len(total_candidates))  # 选择的候选数量。
-        selected_candidates = select_top_candidates(total_candidates, top_n)  # 按评分选择 top-N。
-    else:
-        selected_candidates = total_candidates  # 不筛选，保留所有候选
-        top_n = len(total_candidates)
+    # large_step阶段完成，不进行筛选（删除在time_boundary的筛选功能）
     if logger:
-        logger.info(f'[Dynamic] Selection enabled: {enable_selection} | Total candidates: {len(total_candidates)} | Selected top-N: {len(selected_candidates)}')
+        logger.info(f'[Dynamic] Large-step completed | Total candidates: {len(total_candidates)}')
+
+    # 读取时间节点配置
+    time_boundary = get_time_boundary(dynamic_cfg, 750)  # time_boundary用于划分large_step和refine
+    enable_selection = selector_cfg.get('enable_selection', False)
+    selection_time = selector_cfg.get('selection_time')
+    
+    # 确保refine使用time_boundary（原有功能）
+    if 'time_upper' not in refine_cfg:
+        refine_cfg['time_upper'] = time_boundary
+    
+    if logger:
+        if enable_selection and selection_time is not None:
+            logger.info(f'[Selector] Selection will be performed at t={selection_time} during refine stage')
+        else:
+            logger.info(f'[Selector] No selection, refine from t={time_boundary} to t=0')
 
     refined_records = []  # 存储精炼后的结果。
     n_sampling = max(refine_cfg.get('n_sampling', 1), 1)  # 精炼次数。
 
-    for cand_idx, cand in enumerate(selected_candidates):  # 遍历候选集。
+    # 第一阶段refine：从time_boundary到selection_time（如果启用筛选）
+    intermediate_candidates = total_candidates  # 初始候选集
+    if enable_selection and selection_time is not None and selection_time < time_boundary:
+        # 第一阶段refine：从t=750到t=250
+        intermediate_refined = []
+        for cand_idx, cand in enumerate(total_candidates):
+            for refine_idx in range(n_sampling):
+                # 构建单样本批次用于精炼
+                batch = Batch.from_data_list([data.clone()], follow_batch=FOLLOW_BATCH).to(device)
+                batch_protein = batch.protein_element_batch
+                
+                # 创建配体批次索引
+                num_atoms = max(1, int(cand.get('num_atoms', 10)))
+                repeats_val = torch.tensor([num_atoms], device=device, dtype=torch.long)
+                batch_ligand = safe_repeat_interleave(
+                    torch.arange(1, dtype=torch.long),
+                    repeats_val,
+                    device=device
+                )
+                
+                # 准备初始状态
+                init_pos = torch.tensor(cand['pos'], dtype=torch.float32, device=device)
+                init_log_v = torch.tensor(cand['log_v'], dtype=torch.float32, device=device)
+                if getattr(model, 'ligand_v_input', 'onehot') == 'log_prob':
+                    init_input = init_log_v
+                    log_mode = 'log_prob'
+                else:
+                    init_input = init_log_v.argmax(dim=-1)
+                    log_mode = 'auto'
+                
+                # 第一阶段refine：从time_boundary到selection_time
+                res = model.sample_diffusion_refinement(
+                    protein_pos=batch.protein_pos,
+                    protein_v=batch.protein_atom_feature.float(),
+                    batch_protein=batch_protein,
+                    init_ligand_pos=init_pos,
+                    init_ligand_v=init_input,
+                    batch_ligand=batch_ligand,
+                    center_pos_mode=center_pos_mode,
+                    pos_only=pos_only,
+                    step_stride=refine_cfg.get('stride'),
+                    step_size=refine_cfg.get('step_size'),
+                    add_noise=refine_cfg.get('noise_scale'),
+                    pos_clip=refine_cfg.get('pos_clip'),
+                    v_clip=refine_cfg.get('v_clip'),
+                    time_upper=time_boundary,  # 从time_boundary开始
+                    time_lower=selection_time,  # 到selection_time结束
+                    num_cycles=refine_cfg.get('cycles', 1),
+                    log_ligand_input_mode='log_prob' if log_mode == 'log_prob' else 'auto'
+                )
+                
+                # 提取中间结果
+                pos_intermediate = res['pos'].detach().cpu().numpy().astype(np.float64)
+                v_intermediate = res['v'].detach().cpu().numpy()
+                log_v_intermediate = res['log_v'].detach().cpu().numpy().astype(np.float32)
+                
+                intermediate_candidate = {
+                    'pos': pos_intermediate,
+                    'v': v_intermediate,
+                    'log_v': log_v_intermediate,
+                    'num_atoms': num_atoms,
+                    'source_cand_idx': cand_idx,
+                    'refine_idx': refine_idx,
+                }
+                # 评估中间候选
+                metric_info = evaluate_candidate(pos_intermediate, v_intermediate, ligand_atom_mode, selector_cfg)
+                intermediate_candidate.update(metric_info)
+                intermediate_refined.append(intermediate_candidate)
+        
+        # 在selection_time进行筛选
+        top_n = selector_cfg.get('top_n', len(intermediate_refined))
+        selected_intermediate = select_top_candidates(intermediate_refined, top_n)
+        if logger:
+            logger.info(f'[Selector] Selection at t={selection_time} | Total: {len(intermediate_refined)} | Selected: {len(selected_intermediate)}')
+        intermediate_candidates = selected_intermediate
+    else:
+        # 如果未启用筛选，直接使用large_step的候选
+        intermediate_candidates = total_candidates
+
+    # 第二阶段refine：从selection_time（或time_boundary）到0
+    for cand_idx, cand in enumerate(intermediate_candidates):  # 遍历候选集。
         for refine_idx in range(n_sampling):  # 对每个候选执行多次精炼采样。
             # 构建单样本批次用于精炼。
             batch = Batch.from_data_list([data.clone()], follow_batch=FOLLOW_BATCH).to(device)
@@ -997,7 +1104,8 @@ def _run_legacy_dynamic(model, data, config, ligand_atom_mode, device='cuda:0', 
                 repeats_val,
                 device=device
             )
-            # 将候选的位置和类别转换为张量，作为精炼的初始状态。
+            # 将候选的位置和类别转换为张量，作为精炼的初始状态
+            # 如果cand来自第一阶段refine，使用refined结果；否则使用large_step的结果
             init_pos = torch.tensor(cand['pos'], dtype=torch.float32, device=device)  # 初始位置。
             init_log_v = torch.tensor(cand['log_v'], dtype=torch.float32, device=device)  # 初始类别对数概率。
             # 根据模型配置确定输入格式。
@@ -1032,7 +1140,7 @@ def _run_legacy_dynamic(model, data, config, ligand_atom_mode, device='cuda:0', 
                     add_noise=refine_cfg.get('noise_scale'),
                     pos_clip=refine_cfg.get('pos_clip'),
                     v_clip=refine_cfg.get('v_clip'),
-                    time_upper=refine_cfg.get('time_upper') if 'time_upper' in refine_cfg else get_time_boundary(dynamic_cfg, 750),
+                    time_upper=selection_time if (enable_selection and selection_time is not None and selection_time < time_boundary) else (refine_cfg.get('time_upper') if 'time_upper' in refine_cfg else get_time_boundary(dynamic_cfg, 750)),
                     time_lower=refine_cfg.get('time_lower', 0),
                     num_cycles=refine_cfg.get('cycles', 1),
                     log_ligand_input_mode='log_prob' if log_mode == 'log_prob' else 'auto'

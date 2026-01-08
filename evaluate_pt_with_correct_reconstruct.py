@@ -41,6 +41,7 @@ import json
 import time
 import glob
 import re
+import shutil
 
 try:
     import pandas as pd
@@ -85,7 +86,172 @@ from utils.evaluation import eval_atom_type
 from utils.evaluation import eval_bond_length
 from utils.evaluation import analyze
 from utils.evaluation import similarity
+from utils.evaluation.lilly_medchem_rules import evaluate_lilly_medchem_rules
 from collections import Counter
+
+
+def calculate_comprehensive_score(eval_result):
+    """
+    根据评估结果计算综合模型评分。
+    
+    公式: 100 * (基础分加权和) * PAINS惩罚 * 稳定性惩罚
+    
+    参数:
+    eval_result (dict): 包含评估指标的字典
+    
+    返回:
+    float: 计算后的模型评分
+    """
+    # 1. 预处理 Vina 亲和力
+    # Excel逻辑: MAX(0, MIN(1, (-C2-6)/6))
+    # 物理含义: -6 kcal/mol 以下开始得分，-12 kcal/mol 拿满分。
+    vina_affinity = None
+    if eval_result.get('vina_dock') and len(eval_result['vina_dock']) > 0:
+        vina_affinity = eval_result['vina_dock'][0].get('affinity')
+    elif eval_result.get('vina_score_only') is not None:
+        vina_affinity = eval_result['vina_score_only']
+    elif eval_result.get('vina_minimize') is not None:
+        vina_affinity = eval_result['vina_minimize']
+    
+    if vina_affinity is None:
+        # 如果没有亲和力数据，返回0分
+        return 0.0
+    
+    affinity_norm = (-vina_affinity - 6) / 6
+    affinity_norm = max(0.0, min(1.0, affinity_norm))  # 限制在 0-1 之间
+    
+    # 2. 获取其他评分指标
+    chem = eval_result.get('chem', {})
+    qed = chem.get('qed', 0.0) if chem else 0.0
+    sa = chem.get('sa', 0.0) if chem else 0.0
+    lipinski = eval_result.get('lipinski', 0)
+    if lipinski == 'N/A' or lipinski is None:
+        lipinski = 0
+    else:
+        lipinski = int(lipinski)
+    
+    # SA评分需要确认：SA评分通常是"越低越好"（合成难度），但这里假设已经归一化为"越高越好"
+    # 如果SA是越低越好，需要转换：sa_normalized = 1 - sa / 10 (假设最大值为10)
+    # 这里假设SA已经归一化到0-1范围，且越高越好
+    sa_normalized = sa if sa <= 1.0 else (1.0 - sa / 10.0)  # 如果SA>1，假设是原始SA评分，需要转换
+    
+    # 3. 计算加权基础分 (Base Score)
+    # 权重: 亲和力(40%) + QED(30%) + SA(20%) + Lipinski(10%)
+    base_score = (
+        0.4 * affinity_norm +
+        0.3 * qed +
+        0.2 * sa_normalized +
+        0.1 * (lipinski / 5.0)
+    )
+    
+    # 4. 计算惩罚系数 (Multipliers)
+    # PAINS 惩罚: 如果检测到 (True)，系数为 0.5，否则 1.0
+    pains = eval_result.get('pains', False)
+    if pains == 'N/A' or pains is None:
+        pains = False
+    pains_multiplier = 0.5 if pains else 1.0
+    
+    # 稳定性惩罚: 如果不稳定 (False)，系数为 0.9，否则 1.0
+    # 注意：check_stability检查的是基于坐标推断的键级是否符合价键规则
+    # 即使RDKit修复了价键错误，如果坐标质量差，仍应给予一定惩罚
+    stability = eval_result.get('stability', {})
+    if isinstance(stability, dict):
+        molecule_stable = stability.get('molecule_stable', True)
+    else:
+        molecule_stable = True if stability else False
+    # 如果分子不稳定（坐标质量差），给予0.9的惩罚系数
+    stability_multiplier = 0.9 if not molecule_stable else 1.0
+    
+    # 5. 计算最终得分 (Total Score)
+    final_score = 100.0 * base_score * pains_multiplier * stability_multiplier
+    
+    return final_score
+
+
+def extract_protein_id(ligand_filename=None, protein_filename=None):
+    """
+    从ligand_filename或protein_filename中提取蛋白质ID（通常是4位字母数字组合，如1a4k, 7ew4等）。
+    
+    参数:
+    ligand_filename: 配体文件名（例如：1a4k_ligand.sdf 或 1a4k_rec_ligand.sdf）
+    protein_filename: 蛋白质文件名（例如：1a4k_rec.pdb）
+    
+    返回:
+    str: 蛋白质ID（大写，例如：1A4K），如果无法提取则返回'UNKNOWN'
+    """
+    # 优先从protein_filename提取
+    if protein_filename:
+        try:
+            # 提取文件名（不含路径）
+            protein_basename = Path(protein_filename).stem
+            # 取第一个下划线前的部分作为蛋白质ID
+            protein_id = protein_basename.split('_')[0].upper()
+            # 验证是否是有效的蛋白质ID格式（通常是4位字母数字）
+            if len(protein_id) >= 4 and protein_id.isalnum():
+                return protein_id[:4]  # 只取前4位
+        except:
+            pass
+    
+    # 如果protein_filename不可用，从ligand_filename提取
+    if ligand_filename:
+        try:
+            # 提取文件名（不含路径和扩展名）
+            ligand_basename = Path(ligand_filename).stem
+            # 取第一个下划线前的部分作为蛋白质ID
+            protein_id = ligand_basename.split('_')[0].upper()
+            # 验证是否是有效的蛋白质ID格式
+            if len(protein_id) >= 4 and protein_id.isalnum():
+                return protein_id[:4]  # 只取前4位
+        except:
+            pass
+    
+    # 如果都无法提取，返回UNKNOWN
+    return 'UNKNOWN'
+
+
+def generate_molecule_id(protein_id, generation_time, score):
+    """
+    生成分子身份证。
+    
+    格式: 蛋白质ID_生成时间_分子评分
+    
+    参数:
+    protein_id: 蛋白质ID（4位字母数字组合，如1A4K）
+    generation_time: 生成时间（datetime对象或时间戳字符串）
+    score: 分子评分（float）
+    
+    返回:
+    str: 分子身份证字符串
+    """
+    # 格式化蛋白质ID（确保是字符串，且适合作为文件名）
+    if protein_id is None:
+        protein_id = 'UNKNOWN'
+    protein_id_str = str(protein_id).upper().replace('/', '_').replace('\\', '_').replace(':', '_')
+    # 确保蛋白质ID不超过4位
+    if len(protein_id_str) > 4:
+        protein_id_str = protein_id_str[:4]
+    
+    # 格式化生成时间
+    if isinstance(generation_time, datetime):
+        time_str = generation_time.strftime('%Y%m%d_%H%M%S')
+    elif isinstance(generation_time, str):
+        time_str = generation_time
+    else:
+        time_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # 格式化评分（保留2位小数，使用'p'代表小数点）
+    score_formatted = f"{score:.2f}"
+    if '.' in score_formatted:
+        # 如果有小数部分，用'p'替换小数点
+        score_str = score_formatted.replace('.', 'p')
+    else:
+        # 如果是整数，添加'p00'表示0.00
+        score_str = f"{score_formatted}p00"
+    
+    # 组合成身份证
+    molecule_id = f"{protein_id_str}_{time_str}_{score_str}"
+    
+    return molecule_id
 
 
 def generate_eval_dir_name(data_id, config, timestamp=None):
@@ -479,6 +645,11 @@ def evaluate_single_molecule(mol, ligand_filename, protein_root,
         'conformer_energy': None,  # 构象能量
         'tpsa': None,  # TPSA（拓扑极性表面积）
         'rdkit_valid': None,  # RDKit验证通过（True/False）
+        'lilly_medchem_passed': None,  # Lilly Medchem Rules是否通过
+        'lilly_medchem_demerit': None,  # Lilly Medchem Rules扣分
+        'lilly_medchem_description': None,  # Lilly Medchem Rules描述（匹配规则、拒绝原因等）
+        'comprehensive_score': None,  # 综合模型评分
+        'molecule_id': None,  # 分子身份证
     }
     
     try:
@@ -613,6 +784,38 @@ def evaluate_single_molecule(mol, ligand_filename, protein_root,
         except Exception as e:
             if debug:
                 print(f"  ⚠️  构象能量计算失败: {e}")
+        
+        # 1.8 Lilly Medchem Rules评估
+        try:
+            lilly_result = evaluate_lilly_medchem_rules(mol)
+            result['lilly_medchem_passed'] = lilly_result['passed']
+            result['lilly_medchem_demerit'] = lilly_result['demerit']
+            
+            # 构建描述信息
+            description_parts = []
+            if not lilly_result['passed']:
+                # 如果未通过，优先显示拒绝原因
+                if lilly_result['reject_reason']:
+                    description_parts.append(f"拒绝原因: {lilly_result['reject_reason']}")
+            if lilly_result['matched_rules']:
+                description_parts.append(f"匹配规则: {', '.join(lilly_result['matched_rules'])}")
+            if lilly_result['demerit'] > 0:
+                description_parts.append(f"扣分: {lilly_result['demerit']}/{lilly_result['demerit_cutoff']}")
+            if lilly_result.get('n_heavy_atoms', 0) > 0:
+                description_parts.append(f"重原子数: {lilly_result['n_heavy_atoms']}")
+            
+            result['lilly_medchem_description'] = '; '.join(description_parts) if description_parts else '通过'
+            
+            if debug:
+                if lilly_result['passed']:
+                    print(f"  ✅ Lilly Medchem Rules: 通过 (扣分={lilly_result['demerit']}/{lilly_result['demerit_cutoff']})")
+                    if lilly_result['matched_rules']:
+                        print(f"     匹配规则: {', '.join(lilly_result['matched_rules'])}")
+                else:
+                    print(f"  ❌ Lilly Medchem Rules: 未通过 ({lilly_result['reject_reason']})")
+        except Exception as e:
+            if debug:
+                print(f"  ⚠️  Lilly Medchem Rules评估失败: {e}")
         
         # 2. 生成SMILES
         try:
@@ -829,6 +1032,11 @@ def _evaluate_single_molecule_worker(args_tuple):
                 'conformer_energy': None,
                 'tpsa': None,
                 'rdkit_valid': None,
+                'lilly_medchem_passed': None,
+                'lilly_medchem_demerit': None,
+                'lilly_medchem_description': None,
+                'comprehensive_score': None,
+                'molecule_id': None,
             }
         
         # 调用评估函数（需要在子进程中重新导入）
@@ -1154,6 +1362,11 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                 'conformer_energy': None,
                 'tpsa': None,
                 'rdkit_valid': None,
+                'lilly_medchem_passed': None,
+                'lilly_medchem_demerit': None,
+                'lilly_medchem_description': None,
+                'comprehensive_score': None,
+                'molecule_id': None,
                 'vina_minimize': None,
                 'atom_type_jsd': None,
                 'bond_length_jsd': None,
@@ -1259,6 +1472,8 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
     pred_positions = data['pred_ligand_pos']
     pred_atom_types = data['pred_ligand_v']
     ligand_filename = data['data'].ligand_filename
+    # 提取蛋白质文件名（如果存在）
+    protein_filename = getattr(data['data'], 'protein_filename', None)
     
     # 从extra_info中提取data_id（如果存在）
     data_id = None
@@ -1356,6 +1571,22 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
         sdf_dir = eval_output_dir / 'reconstructed_molecules'
         sdf_dir.mkdir(parents=True, exist_ok=True)
         print(f"✅ SDF文件将保存至: {sdf_dir}")
+    
+    # 创建按评分分类的文件夹（在主路径下）
+    score_category_dirs = {
+        '65-70': REPO_ROOT / 'molecules_score_65-70',
+        '70-80': REPO_ROOT / 'molecules_score_70-80',
+        '80+': REPO_ROOT / 'molecules_score_80plus'
+    }
+    for category, dir_path in score_category_dirs.items():
+        dir_path.mkdir(parents=True, exist_ok=True)
+        # 在每个分类文件夹下创建molecules和proteins子文件夹
+        (dir_path / 'molecules').mkdir(parents=True, exist_ok=True)
+        (dir_path / 'proteins').mkdir(parents=True, exist_ok=True)
+    print(f"✅ 评分分类文件夹已创建:")
+    print(f"   - 65-70分: {score_category_dirs['65-70']}")
+    print(f"   - 70-80分: {score_category_dirs['70-80']}")
+    print(f"   - 80分以上: {score_category_dirs['80+']}")
     
     print(f"\n{'='*70}")
     print(f"开始评估 {num_samples} 个分子")
@@ -1548,6 +1779,8 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                     'conformer_energy': None,
                     'tpsa': None,
                     'rdkit_valid': None,
+                    'comprehensive_score': None,
+                    'molecule_id': None,
                 }
                 
                 # 仍然保存这个分子（标记为失败），以便后续分析
@@ -1630,10 +1863,35 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                 sys.stdout.flush()
                 pbar.refresh()  # 刷新进度条
             
-            # 3.3 保存SDF文件（仅保存成功重建的分子，重建失败的不保存）
+            # 3.3 计算综合评分和生成分子身份证
+            try:
+                comprehensive_score = calculate_comprehensive_score(eval_result)
+                eval_result['comprehensive_score'] = comprehensive_score
+                
+                # 生成分子身份证：蛋白质ID+生成时间+分子评分
+                # 从ligand_filename或protein_filename中提取蛋白质ID
+                protein_id = extract_protein_id(ligand_filename=ligand_filename, protein_filename=protein_filename)
+                generation_time = datetime.now()
+                molecule_id = generate_molecule_id(protein_id, generation_time, comprehensive_score)
+                eval_result['molecule_id'] = molecule_id
+                
+                if debug:
+                    print(f"  ✅ 综合模型评分: {comprehensive_score:.2f}")
+                    print(f"  ✅ 分子身份证: {molecule_id}")
+            except Exception as e:
+                if debug:
+                    print(f"  ⚠️  计算评分或生成身份证失败: {e}")
+                eval_result['comprehensive_score'] = 0.0
+                # 如果提取失败，使用UNKNOWN作为蛋白质ID
+                protein_id = extract_protein_id(ligand_filename=ligand_filename, protein_filename=protein_filename)
+                eval_result['molecule_id'] = f"{protein_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_0p00"
+            
+            # 3.4 保存SDF文件（仅保存成功重建的分子，重建失败的不保存）
             if save_sdf and sdf_dir and mol is not None:
                 try:
-                    sdf_path = str(sdf_dir / f'molecule_{idx:04d}.sdf')
+                    # 使用分子身份证作为文件名
+                    molecule_id = eval_result.get('molecule_id', f'molecule_{idx:04d}')
+                    sdf_path = str(sdf_dir / f'{molecule_id}.sdf')
                     writer = Chem.SDWriter(sdf_path)
                     
                     # 添加属性信息
@@ -1649,18 +1907,89 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                     if eval_result.get('vina_minimize') is not None:
                         mol.SetProp('Vina_Minimize', f"{eval_result['vina_minimize']:.3f}")
                     mol.SetProp('Molecule_Index', str(idx))
+                    if eval_result.get('comprehensive_score') is not None:
+                        mol.SetProp('Comprehensive_Score', f"{eval_result['comprehensive_score']:.2f}")
+                    if eval_result.get('molecule_id'):
+                        mol.SetProp('Molecule_ID', eval_result['molecule_id'])
                     
                     writer.write(mol)
                     writer.close()
                     
                     if debug:
-                        print(f"  💾 已保存SDF: molecule_{idx:04d}.sdf")
+                        print(f"  💾 已保存SDF: {molecule_id}.sdf")
+                    
+                    # 根据综合评分分类并复制文件
+                    comprehensive_score = eval_result.get('comprehensive_score')
+                    if comprehensive_score is not None:
+                        try:
+                            # 确定评分分类
+                            category = None
+                            if 65 <= comprehensive_score < 70:
+                                category = '65-70'
+                            elif 70 <= comprehensive_score < 80:
+                                category = '70-80'
+                            elif comprehensive_score >= 80:
+                                category = '80+'
+                            
+                            if category:
+                                target_dir = score_category_dirs[category]
+                                
+                                # 复制SDF文件到分类文件夹
+                                target_sdf_path = target_dir / 'molecules' / f'{molecule_id}.sdf'
+                                shutil.copy2(sdf_path, target_sdf_path)
+                                
+                                # 复制对应的蛋白质文件
+                                if protein_filename:
+                                    # 查找蛋白质文件路径
+                                    protein_path = None
+                                    # 尝试多个可能的路径
+                                    possible_protein_paths = [
+                                        Path(protein_root) / protein_filename,
+                                        Path(protein_root) / Path(ligand_filename).parent / protein_filename,
+                                    ]
+                                    # 如果protein_filename是相对路径，尝试从ligand_filename推断
+                                    if '/' in ligand_filename or '\\' in ligand_filename:
+                                        ligand_dir = Path(ligand_filename).parent
+                                        possible_protein_paths.append(Path(protein_root) / ligand_dir / protein_filename)
+                                        # 尝试从ligand文件名推断protein文件名
+                                        ligand_stem = Path(ligand_filename).stem
+                                        if '_ligand' in ligand_stem:
+                                            protein_stem = ligand_stem.replace('_ligand', '_rec')
+                                            possible_protein_paths.append(Path(protein_root) / ligand_dir / f'{protein_stem}.pdb')
+                                    
+                                    for ppath in possible_protein_paths:
+                                        if ppath.exists():
+                                            protein_path = ppath
+                                            break
+                                    
+                                    if protein_path and protein_path.exists():
+                                        # 提取蛋白质文件名（不含路径）
+                                        protein_basename = protein_path.name
+                                        target_protein_path = target_dir / 'proteins' / protein_basename
+                                        # 如果目标文件不存在，才复制（避免重复复制相同的蛋白质文件）
+                                        if not target_protein_path.exists():
+                                            shutil.copy2(protein_path, target_protein_path)
+                                        
+                                        if debug:
+                                            print(f"  📋 已复制到{category}分类: SDF和蛋白质文件")
+                                    else:
+                                        if debug:
+                                            print(f"  ⚠️  未找到蛋白质文件，仅复制SDF")
+                                else:
+                                    if debug:
+                                        print(f"  ⚠️  无蛋白质文件名信息，仅复制SDF")
+                                
+                                if debug:
+                                    print(f"  ✅ 已分类到{category}文件夹: {molecule_id} (评分: {comprehensive_score:.2f})")
+                        except Exception as e:
+                            if debug:
+                                print(f"  ⚠️  分类复制文件失败: {e}")
                         
                 except Exception as e:
                     if debug:
                         print(f"  ⚠️  保存SDF失败: {e}")
             
-            # 3.4 保存结果（仅保存成功重建的分子）
+            # 3.5 保存结果（仅保存成功重建的分子）
             # 注意：重建失败的分子不会被记录，避免数据质量下降
             results.append({
                 'mol_idx': idx,
@@ -1674,6 +2003,8 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                 'bond_length_jsd': eval_result.get('bond_length_jsd'),
                 'pair_length_jsd': eval_result.get('pair_length_jsd'),
                 'success': eval_result['success'],
+                'comprehensive_score': eval_result.get('comprehensive_score'),
+                'molecule_id': eval_result.get('molecule_id'),
                 # 新增评估指标
                 'stability': eval_result.get('stability'),
                 'basic_info': eval_result.get('basic_info'),
@@ -2041,6 +2372,9 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
             'rdkit_rmsd_median_values': [r.get('rdkit_rmsd', {}).get('median', 0) for r in results if r.get('rdkit_rmsd') and not np.isnan(r.get('rdkit_rmsd', {}).get('median', np.nan))],
             'conformer_energy_values': [r.get('conformer_energy', 0) for r in results if r.get('conformer_energy') != 'N/A' and r.get('conformer_energy') is not None],
             'rdkit_valid_values': [r.get('rdkit_valid', False) for r in results if r.get('rdkit_valid') is not None],
+            'lilly_medchem_passed_values': [r.get('lilly_medchem_passed', False) for r in results if r.get('lilly_medchem_passed') is not None],
+            'lilly_medchem_demerit_values': [r.get('lilly_medchem_demerit', 0) for r in results if r.get('lilly_medchem_demerit') is not None],
+            'lilly_medchem_description_values': [r.get('lilly_medchem_description', '') for r in results if r.get('lilly_medchem_description') is not None],
             'uniqueness': uniqueness,
             'internal_similarity': internal_similarity,
         },
