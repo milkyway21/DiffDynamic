@@ -1233,6 +1233,36 @@ def collect_all_evaluation_results(results, batch_start_time):
     reconstruct_success_rate = (total_n_reconstruct_success / total_num_samples * 100) if total_num_samples > 0 else 0.0
     docking_success_rate = (len(molecule_records) / total_num_samples * 100) if total_num_samples > 0 else 0.0
     
+    # 计算有效分子数量（剔除vinadock>0、vinascore>0或vinamin>0的异常数据）
+    # 注意：不删除任何能对接的分子，只是统计有效分子数量
+    valid_molecule_count = 0
+    for r in molecule_records:
+        vina_dock = r.get('Vina_Dock_亲和力', 'N/A')
+        vina_score = r.get('Vina_ScoreOnly_亲和力', 'N/A')
+        vina_min = r.get('Vina_Minimize_亲和力', 'N/A')
+        
+        # 检查是否为异常数据（vinadock>0、vinascore>0或vinamin>0）
+        is_abnormal = False
+        try:
+            if vina_dock not in ('N/A', None) and not pd.isna(vina_dock):
+                if float(vina_dock) > 0:
+                    is_abnormal = True
+            if vina_score not in ('N/A', None) and not pd.isna(vina_score):
+                if float(vina_score) > 0:
+                    is_abnormal = True
+            if vina_min not in ('N/A', None) and not pd.isna(vina_min):
+                if float(vina_min) > 0:
+                    is_abnormal = True
+        except (ValueError, TypeError):
+            pass
+        
+        # 如果不是异常数据，则计入有效分子
+        if not is_abnormal:
+            valid_molecule_count += 1
+    
+    # 计算有效分子比例（有效分子数量 / 应生成分子数）
+    valid_molecule_ratio = (valid_molecule_count / total_num_samples * 100) if total_num_samples > 0 else 0.0
+    
     summary_stats = {
         'batch启动时间': datetime.fromtimestamp(batch_start_time).strftime('%Y-%m-%d %H:%M:%S'),
         '应生成分子数': total_num_samples,
@@ -1240,6 +1270,8 @@ def collect_all_evaluation_results(results, batch_start_time):
         '重建成功百分比(%)': f"{reconstruct_success_rate:.2f}",
         '对接成功分子数': len(molecule_records),
         '对接成功百分比(%)': f"{docking_success_rate:.2f}",
+        '有效分子数量': valid_molecule_count,
+        '有效分子比例(%)': f"{valid_molecule_ratio:.2f}",
     }
     
     if molecule_records:
@@ -1704,6 +1736,7 @@ def append_to_merged_summary(excel_file, summary_stats, config_file=None):
             'LSstepsize', 'LSnosie', 'LSLambda1', 'LSLambda2',
             'RFstepsize', 'RFnosie', 'RFLambda1', 'RFLambda2',
             '步数', '取模步长', '可重建率 (%)', '对接成功率 (%)',
+            '有效分子比例 (%)',
             'Vina_Dock 亲和力', 'Vina_ScoreOnly', 'Vina_Minimize',
             'QED 评分（均值）', 'SA 评分（均值）'
         ]
@@ -1849,6 +1882,7 @@ def append_to_merged_summary(excel_file, summary_stats, config_file=None):
         
         row_data['可重建率 (%)'] = safe_float(stats_dict.get('重建成功百分比(%)', 0))
         row_data['对接成功率 (%)'] = safe_float(stats_dict.get('对接成功百分比(%)', 0))
+        row_data['有效分子比例 (%)'] = safe_float(stats_dict.get('有效分子比例(%)', 0))
         row_data['Vina_Dock 亲和力'] = safe_float(stats_dict.get('Vina_Dock_平均亲和力', 0))
         row_data['Vina_ScoreOnly'] = safe_float(stats_dict.get('Vina_ScoreOnly_平均亲和力', 0))
         row_data['Vina_Minimize'] = safe_float(stats_dict.get('Vina_Minimize_平均亲和力', 0))
