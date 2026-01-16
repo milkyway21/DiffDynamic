@@ -11,14 +11,14 @@ sample:
   center_pos_mode: protein
   docking:
     backend: vina_python
-    enable: false
+    enable: true  # 开启对接评估（生成后自动评估）
     tmp_dir: null
-    vina_exhaustiveness: 8
-    vina_poses: 1
+    vina_exhaustiveness: 8  # 对接搜索强度（8是平衡速度和精度的好选择）
+    vina_poses: 1  # 每个分子生成1个对接构象（速度快）
   dynamic:
     time_boundary: 750
     large_step:
-      batch_size: 16
+      batch_size: 25  # 优化：每批20个分子，100个分子需要5次迭代（更高效）
       lambda_coeff_a: 80.0
       lambda_coeff_b: 20.0
       linear_step_lower: 15
@@ -26,19 +26,19 @@ sample:
       n_repeat: 1
       noise_scale: 0
       schedule: lambda
-      step_size: 1.02
+      step_size: 0.4  # LSstepsize: 0.4
       stride: 15
       use_adaptive_step: true
       use_time_scale: false
     method: auto
     refine:
       cycles: 1
-      lambda_coeff_a: 20.0
-      lambda_coeff_b: 2.0
+      lambda_coeff_a: 40.0
+      lambda_coeff_b: 5.0
       linear_step_lower: 3
       linear_step_upper: 8
-      n_sampling: 1
-      noise_scale: 0.1
+      n_sampling: 4
+      noise_scale: 0.05  # RFnoise: 0.05
       schedule: lambda
       step_size: 0.2
       stride: 5
@@ -46,15 +46,15 @@ sample:
       use_adaptive_step: true
       use_time_scale: false
     selector:
-      enable_selection: true  # 开启候选筛选
+      enable_selection: false  # 开启候选筛选
       selection_time: 250  # 筛选时间节点（在t=250时进行筛选，与time_boundary共存）
       min_sa: 0.3  # SA最小下限（SA越大越好，范围[0,1]，值越大越易合成）
       min_qed: 0.3  # QED最小下限（QED越大越好，范围[0,1]，值越大越像药物）
       qed_weight: 1.0  # QED权重（在综合评分中QED的权重）
       sa_weight: 1.0  # SA权重（在综合评分中SA的权重）
-      top_n: 16  # 选择前N个最优候选
+      top_n: 20  # 选择前20个最优候选（从100个中筛选，保留20%）
   mode: dynamic
-  num_samples: 200
+  num_samples: 100  # 每个靶点生成100个分子
   num_steps: 1000
   pos_only: false
   sample_num_atoms: prior

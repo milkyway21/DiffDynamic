@@ -29,7 +29,7 @@
     
     # 组合使用
     python3 batch_sampleandeval_parallel.py --start 0 --end 99 --gpus "0" --num_cpu_cores 20
-     python3 batch_sampleandeval_parallel.py --start 0 --end 9 --gpus "1-5" --num_cpu_cores 20
+     iii
     # 指定蛋白质数据根目录
     python3 batch_sampleandeval_parallel.py --protein_root /path/to/protein/data
     
@@ -1897,9 +1897,15 @@ def append_to_merged_summary(excel_file, summary_stats, config_file=None):
         new_row['文件名'] = excel_file.name
         
         # 读取现有的汇总文件或创建新的
+        df_combined = None
         if merged_summary_file.exists():
             try:
-                df_existing = pd.read_excel(merged_summary_file, engine='openpyxl')
+                # 尝试读取"批次汇总"表，如果不存在则读取第一个sheet
+                try:
+                    df_existing = pd.read_excel(merged_summary_file, sheet_name='批次汇总', engine='openpyxl')
+                except Exception:
+                    df_existing = pd.read_excel(merged_summary_file, engine='openpyxl')
+                
                 # 检查是否已存在相同的记录（通过文件名判断）
                 if '文件名' in df_existing.columns:
                     if excel_file.name in df_existing['文件名'].values:
@@ -1908,26 +1914,71 @@ def append_to_merged_summary(excel_file, summary_stats, config_file=None):
                         for col in columns_order + ['文件名']:
                             if col in df_existing.columns:
                                 df_existing.at[idx, col] = new_row.get(col)
-                        df_existing.to_excel(merged_summary_file, index=False, engine='openpyxl')
-                        print(f"✅ 已更新汇总Excel文件: {merged_summary_file.name}")
-                        return
-                # 追加新行
-                # 确保列顺序一致
-                all_columns = columns_order + ['文件名']
-                df_new = pd.DataFrame([new_row], columns=all_columns)
-                # 如果现有文件缺少某些列，补齐
-                for col in all_columns:
-                    if col not in df_existing.columns:
-                        df_existing[col] = None
-                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                        df_combined = df_existing
+                    else:
+                        # 追加新行
+                        all_columns = columns_order + ['文件名']
+                        df_new = pd.DataFrame([new_row], columns=all_columns)
+                        # 如果现有文件缺少某些列，补齐
+                        for col in all_columns:
+                            if col not in df_existing.columns:
+                                df_existing[col] = None
+                        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                else:
+                    # 如果没有文件名列，直接追加
+                    all_columns = columns_order + ['文件名']
+                    df_new = pd.DataFrame([new_row], columns=all_columns)
+                    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
             except Exception as e:
                 print(f"⚠️  读取现有汇总文件失败，创建新文件: {e}")
                 df_combined = pd.DataFrame([new_row], columns=columns_order + ['文件名'])
         else:
             df_combined = pd.DataFrame([new_row], columns=columns_order + ['文件名'])
         
-        # 保存汇总文件
-        df_combined.to_excel(merged_summary_file, index=False, engine='openpyxl')
+        # 保存汇总文件（使用ExcelWriter以支持多个sheet）
+        with pd.ExcelWriter(merged_summary_file, engine='openpyxl') as writer:
+            df_combined.to_excel(writer, sheet_name='批次汇总', index=False)
+            
+            # 合并所有批次Excel文件中的"正常分子"表
+            try:
+                all_valid_molecules = []
+                batchsummary_dir = excel_file.parent
+                
+                # 查找所有批次Excel文件
+                batch_files = list(batchsummary_dir.glob('batch_evaluation_summary_*.xlsx'))
+                
+                for batch_file in batch_files:
+                    try:
+                        # 尝试读取"正常分子"表
+                        df_valid = pd.read_excel(batch_file, sheet_name='正常分子', engine='openpyxl')
+                        if df_valid is not None and len(df_valid) > 0:
+                            # 添加来源文件列
+                            df_valid['来源文件'] = batch_file.name
+                            all_valid_molecules.append(df_valid)
+                    except Exception:
+                        # 如果该文件没有"正常分子"表，跳过
+                        continue
+                
+                # 合并所有正常分子
+                if all_valid_molecules:
+                    df_all_valid = pd.concat(all_valid_molecules, ignore_index=True)
+                    # 按Vina_Dock_亲和力排序
+                    if 'Vina_Dock_亲和力' in df_all_valid.columns:
+                        df_all_valid['Vina_Dock_亲和力_temp'] = df_all_valid['Vina_Dock_亲和力'].replace('N/A', np.nan)
+                        df_all_valid = df_all_valid.sort_values('Vina_Dock_亲和力_temp', na_position='last')
+                        df_all_valid = df_all_valid.drop(columns=['Vina_Dock_亲和力_temp'])
+                    df_all_valid.to_excel(writer, sheet_name='合并正常分子', index=False)
+                    print(f"✅ 已合并 {len(df_all_valid)} 个正常分子到汇总文件")
+                else:
+                    # 创建空的正常分子表
+                    pd.DataFrame().to_excel(writer, sheet_name='合并正常分子', index=False)
+            except Exception as e:
+                print(f"⚠️  合并正常分子失败: {e}")
+                import traceback
+                traceback.print_exc()
+                # 即使合并失败，也要保存批次汇总
+                df_combined.to_excel(writer, sheet_name='批次汇总', index=False)
+        
         print(f"✅ 已追加到汇总Excel文件: {merged_summary_file.name}")
         
     except Exception as e:
@@ -1966,9 +2017,39 @@ def save_molecules_to_excel(excel_file, molecule_records, summary_stats, batch_s
                     df_molecules = df_molecules.sort_values('Vina_Dock_亲和力_temp', na_position='last')
                     df_molecules = df_molecules.drop(columns=['Vina_Dock_亲和力_temp'])
                 df_molecules.to_excel(writer, sheet_name='分子评估数据', index=False)
+                
+                # 筛选正常分子（剔除vina三个参数大于0的异常分子）
+                def is_valid_molecule(row):
+                    """判断分子是否正常（vina三个参数都不大于0）"""
+                    vina_dock = row.get('Vina_Dock_亲和力', 'N/A')
+                    vina_score = row.get('Vina_ScoreOnly_亲和力', 'N/A')
+                    vina_min = row.get('Vina_Minimize_亲和力', 'N/A')
+                    
+                    # 检查是否为异常数据（vinadock>0、vinascore>0或vinamin>0）
+                    try:
+                        if vina_dock not in ('N/A', None) and not pd.isna(vina_dock):
+                            if float(vina_dock) > 0:
+                                return False
+                        if vina_score not in ('N/A', None) and not pd.isna(vina_score):
+                            if float(vina_score) > 0:
+                                return False
+                        if vina_min not in ('N/A', None) and not pd.isna(vina_min):
+                            if float(vina_min) > 0:
+                                return False
+                    except (ValueError, TypeError):
+                        # 如果无法转换，保留该分子（可能是N/A）
+                        pass
+                    
+                    return True
+                
+                # 筛选正常分子
+                df_valid = df_molecules[df_molecules.apply(is_valid_molecule, axis=1)].copy()
+                df_valid.to_excel(writer, sheet_name='正常分子', index=False)
             else:
                 df_molecules = pd.DataFrame()
                 df_molecules.to_excel(writer, sheet_name='分子评估数据', index=False)
+                # 创建空的正常分子表
+                pd.DataFrame().to_excel(writer, sheet_name='正常分子', index=False)
             
             stats_items = []
             stats_values = []
@@ -2393,8 +2474,37 @@ def main():
         try:
             gpu_ids = parse_gpu_ids(args.gpus)
             if not gpu_ids:
-                print(f"❌ 错误: 未找到可用的GPU")
-                sys.exit(1)
+                # 如果指定了"all"但检测不到GPU，尝试使用nvidia-smi检测
+                if args.gpus.lower() == 'all':
+                    try:
+                        result = subprocess.run(
+                            ['nvidia-smi', '--list-gpus'],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            num_gpus = len(result.stdout.strip().split('\n'))
+                            gpu_ids = list(range(num_gpus))
+                            print(f"⚠️  警告: PyTorch检测不到CUDA，但nvidia-smi检测到 {num_gpus} 个GPU")
+                            print(f"   将使用GPU IDs: {gpu_ids}")
+                            print(f"   子进程在设置CUDA_VISIBLE_DEVICES后可能会检测到CUDA")
+                        else:
+                            print(f"⚠️  警告: 未找到可用的GPU（PyTorch和nvidia-smi都检测不到）")
+                            print(f"   将继续运行，但任务可能会失败")
+                            print(f"   如果所有任务都失败，请检查Docker容器的GPU配置")
+                            # 使用默认GPU列表，让程序继续运行
+                            gpu_ids = DEFAULT_GPU_IDS
+                    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                        print(f"⚠️  警告: 未找到可用的GPU")
+                        print(f"   将继续运行，但任务可能会失败")
+                        print(f"   如果所有任务都失败，请检查Docker容器的GPU配置")
+                        # 使用默认GPU列表，让程序继续运行
+                        gpu_ids = DEFAULT_GPU_IDS
+                else:
+                    print(f"❌ 错误: 未找到可用的GPU")
+                    print(f"   指定的GPU: {args.gpus}")
+                    sys.exit(1)
         except ValueError as e:
             print(f"❌ 错误: GPU ID格式无效: {e}")
             print(f"   支持的格式: '0,1,2,3', '0-3', '0,2-4,6', 'all'")
@@ -2745,8 +2855,7 @@ def main():
             
             # 批量评估完成后，从 batchsummary 文件读取参数并填写到 evaall bestchoice.xlsx
             try:
-                # 导入更新函数
-                import sys
+                # 导入更新函数（sys已在文件顶部导入）
                 eval_script_path = REPO_ROOT / 'evaluate_pt_with_correct_reconstruct.py'
                 if eval_script_path.exists():
                     # 动态导入模块

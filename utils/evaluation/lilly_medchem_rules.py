@@ -85,16 +85,20 @@ class LillyMedchemRules:
             # 注意：不允许的元素（Ag, Fe, Hg, Zn, Pb, As, Se, Te等）
             # 通过_check_basic_requirements中的原子类型检查来处理
             # 这里主要处理其他需要直接拒绝的结构模式
+            # 格式：(pattern, name)
         ]
         
         # 编译SMARTS模式
         self.reject_queries = []
-        for pattern, name in self.reject_patterns:
+        for pattern_info in self.reject_patterns:
             try:
-                query = Chem.MolFromSmarts(pattern)
-                if query is not None:
-                    self.reject_queries.append((query, name))
-            except:
+                if isinstance(pattern_info, tuple) and len(pattern_info) == 2:
+                    pattern, name = pattern_info
+                    query = Chem.MolFromSmarts(pattern)
+                    if query is not None:
+                        self.reject_queries.append((query, name))
+            except Exception as e:
+                # 如果模式编译失败，跳过（可能是SMARTS语法问题）
                 pass
     
     def _init_demerit_patterns(self):
@@ -298,12 +302,13 @@ class LillyMedchemRules:
         
         return matched_rules, total_demerit
     
-    def evaluate(self, mol: Chem.Mol) -> Dict:
+    def evaluate(self, mol: Chem.Mol, debug: bool = False) -> Dict:
         """
         评估分子是否符合Lilly Medchem Rules
         
         Args:
             mol: RDKit分子对象
+            debug: 是否输出调试信息
             
         Returns:
             dict: 评估结果，包含：
@@ -315,19 +320,55 @@ class LillyMedchemRules:
                 - n_heavy_atoms: 重原子数（int）
                 - details: 详细信息（dict）
         """
-        # 深拷贝避免修改原分子
-        mol = deepcopy(mol)
+        if debug:
+            print(f"    [Lilly] 开始评估，mol类型: {type(mol)}")
         
-        # 标准化分子
-        try:
-            Chem.SanitizeMol(mol)
-        except:
+        # 检查输入是否有效
+        if mol is None:
+            if debug:
+                print(f"    [Lilly] ❌ mol为None")
             return {
                 'passed': False,
                 'demerit': 0,
                 'demerit_cutoff': self.demerit_cutoff,
                 'matched_rules': [],
-                'reject_reason': 'sanitization_failed',
+                'reject_reason': 'mol_is_none',
+                'n_heavy_atoms': 0,
+                'details': {}
+            }
+        
+        # 深拷贝避免修改原分子
+        try:
+            mol = deepcopy(mol)
+            if debug:
+                print(f"    [Lilly] ✅ 深拷贝成功")
+        except Exception as e:
+            if debug:
+                print(f"    [Lilly] ❌ 深拷贝失败: {e}")
+            return {
+                'passed': False,
+                'demerit': 0,
+                'demerit_cutoff': self.demerit_cutoff,
+                'matched_rules': [],
+                'reject_reason': f'deepcopy_failed: {str(e)}',
+                'n_heavy_atoms': 0,
+                'details': {}
+            }
+        
+        # 标准化分子
+        try:
+            Chem.SanitizeMol(mol)
+            if debug:
+                print(f"    [Lilly] ✅ 分子标准化成功")
+        except Exception as e:
+            if debug:
+                print(f"    [Lilly] ❌ 分子标准化失败: {e}")
+            return {
+                'passed': False,
+                'demerit': 0,
+                'demerit_cutoff': self.demerit_cutoff,
+                'matched_rules': [],
+                'reject_reason': f'sanitization_failed: {str(e)}',
                 'n_heavy_atoms': 0,
                 'details': {}
             }
@@ -343,36 +384,66 @@ class LillyMedchemRules:
         }
         
         # 1. 基本要求检查
+        if debug:
+            print(f"    [Lilly] 步骤1: 检查基本要求...")
         passed, reason = self._check_basic_requirements(mol)
         if not passed:
+            if debug:
+                print(f"    [Lilly] ❌ 基本要求检查失败: {reason}")
             result['reject_reason'] = reason
             return result
+        if debug:
+            print(f"    [Lilly] ✅ 基本要求检查通过")
         
         # 2. 原子数量检查
+        if debug:
+            print(f"    [Lilly] 步骤2: 检查原子数量...")
         n_heavy = self._count_heavy_atoms(mol)
         result['n_heavy_atoms'] = n_heavy
+        if debug:
+            print(f"    [Lilly] 重原子数: {n_heavy}")
         
         passed, reason, atom_demerit = self._check_atom_count(mol)
         if not passed:
+            if debug:
+                print(f"    [Lilly] ❌ 原子数量检查失败: {reason}")
             result['reject_reason'] = reason
             return result
+        if debug:
+            print(f"    [Lilly] ✅ 原子数量检查通过，原子数量扣分: {atom_demerit}")
         
         # 3. 直接拒绝规则检查
+        if debug:
+            print(f"    [Lilly] 步骤3: 检查直接拒绝规则...")
         passed, reason = self._check_reject_patterns(mol)
         if not passed:
+            if debug:
+                print(f"    [Lilly] ❌ 直接拒绝规则检查失败: {reason}")
             result['reject_reason'] = reason
             return result
+        if debug:
+            print(f"    [Lilly] ✅ 直接拒绝规则检查通过")
         
         # 4. 扣分规则检查
+        if debug:
+            print(f"    [Lilly] 步骤4: 检查扣分规则...")
         matched_rules, pattern_demerit = self._check_demerit_patterns(mol)
         result['matched_rules'] = matched_rules
+        if debug:
+            print(f"    [Lilly] 匹配规则数: {len(matched_rules)}, 模式扣分: {pattern_demerit}")
+            if matched_rules:
+                print(f"    [Lilly] 匹配的规则: {', '.join(matched_rules)}")
         
         # 总扣分 = 原子数量扣分 + 模式扣分
         total_demerit = atom_demerit + pattern_demerit
         result['demerit'] = total_demerit
+        if debug:
+            print(f"    [Lilly] 总扣分: {total_demerit} (原子数量扣分: {atom_demerit} + 模式扣分: {pattern_demerit})")
         
         # 5. 判断是否通过
         if total_demerit >= self.demerit_cutoff:
+            if debug:
+                print(f"    [Lilly] ❌ 扣分超过阈值 ({total_demerit} >= {self.demerit_cutoff})")
             result['reject_reason'] = f'demerit_exceeded({total_demerit})'
             return result
         
@@ -382,6 +453,9 @@ class LillyMedchemRules:
             'pattern_demerit': pattern_demerit,
             'n_matched_patterns': len(matched_rules)
         }
+        
+        if debug:
+            print(f"    [Lilly] ✅ 评估通过！扣分: {total_demerit}/{self.demerit_cutoff}")
         
         return result
 
@@ -393,7 +467,8 @@ def evaluate_lilly_medchem_rules(mol: Chem.Mol,
                                   demerit_cutoff: int = 100,
                                   relaxed: bool = False,
                                   no_phosphorus: bool = False,
-                                  ok_isotopes: bool = False) -> Dict:
+                                  ok_isotopes: bool = False,
+                                  debug: bool = False) -> Dict:
     """
     便捷函数：评估分子是否符合Lilly Medchem Rules
     
@@ -406,18 +481,59 @@ def evaluate_lilly_medchem_rules(mol: Chem.Mol,
         relaxed: 是否使用宽松模式
         no_phosphorus: 是否拒绝所有含磷分子
         ok_isotopes: 是否允许同位素原子
+        debug: 是否输出调试信息
         
     Returns:
         dict: 评估结果
     """
-    evaluator = LillyMedchemRules(
-        min_atoms=min_atoms,
-        soft_max_atoms=soft_max_atoms,
-        hard_max_atoms=hard_max_atoms,
-        demerit_cutoff=demerit_cutoff,
-        relaxed=relaxed,
-        no_phosphorus=no_phosphorus,
-        ok_isotopes=ok_isotopes
-    )
-    return evaluator.evaluate(mol)
+    if debug:
+        print(f"  [Lilly] 调用 evaluate_lilly_medchem_rules，mol类型: {type(mol)}")
+    
+    # 检查输入是否有效
+    if mol is None:
+        if debug:
+            print(f"  [Lilly] ❌ mol为None，返回错误结果")
+        return {
+            'passed': False,
+            'demerit': 0,
+            'demerit_cutoff': demerit_cutoff,
+            'matched_rules': [],
+            'reject_reason': 'mol_is_none',
+            'n_heavy_atoms': 0,
+            'details': {}
+        }
+    
+    try:
+        if debug:
+            print(f"  [Lilly] 创建评估器...")
+        evaluator = LillyMedchemRules(
+            min_atoms=min_atoms,
+            soft_max_atoms=soft_max_atoms,
+            hard_max_atoms=hard_max_atoms,
+            demerit_cutoff=demerit_cutoff,
+            relaxed=relaxed,
+            no_phosphorus=no_phosphorus,
+            ok_isotopes=ok_isotopes
+        )
+        if debug:
+            print(f"  [Lilly] 评估器创建成功，开始评估...")
+        result = evaluator.evaluate(mol, debug=debug)
+        if debug:
+            print(f"  [Lilly] 评估完成，结果: {result}")
+        return result
+    except Exception as e:
+        # 如果评估过程中出现异常，返回错误结果
+        if debug:
+            print(f"  [Lilly] ❌ 评估异常: {e}")
+            import traceback
+            traceback.print_exc()
+        return {
+            'passed': False,
+            'demerit': 0,
+            'demerit_cutoff': demerit_cutoff,
+            'matched_rules': [],
+            'reject_reason': f'evaluation_error: {str(e)}',
+            'n_heavy_atoms': 0,
+            'details': {}
+        }
 

@@ -786,36 +786,70 @@ def evaluate_single_molecule(mol, ligand_filename, protein_root,
                 print(f"  ⚠️  构象能量计算失败: {e}")
         
         # 1.8 Lilly Medchem Rules评估
-        try:
-            lilly_result = evaluate_lilly_medchem_rules(mol)
-            result['lilly_medchem_passed'] = lilly_result['passed']
-            result['lilly_medchem_demerit'] = lilly_result['demerit']
-            
-            # 构建描述信息
-            description_parts = []
-            if not lilly_result['passed']:
-                # 如果未通过，优先显示拒绝原因
-                if lilly_result['reject_reason']:
-                    description_parts.append(f"拒绝原因: {lilly_result['reject_reason']}")
-            if lilly_result['matched_rules']:
-                description_parts.append(f"匹配规则: {', '.join(lilly_result['matched_rules'])}")
-            if lilly_result['demerit'] > 0:
-                description_parts.append(f"扣分: {lilly_result['demerit']}/{lilly_result['demerit_cutoff']}")
-            if lilly_result.get('n_heavy_atoms', 0) > 0:
-                description_parts.append(f"重原子数: {lilly_result['n_heavy_atoms']}")
-            
-            result['lilly_medchem_description'] = '; '.join(description_parts) if description_parts else '通过'
-            
+        if mol is not None:
+            try:
+                if debug:
+                    print(f"  - 开始Lilly Medchem Rules评估...")
+                lilly_result = evaluate_lilly_medchem_rules(mol, debug=debug)
+                # 确保返回结果不为None
+                if lilly_result is None:
+                    lilly_result = {
+                        'passed': False,
+                        'demerit': 0,
+                        'demerit_cutoff': 100,
+                        'matched_rules': [],
+                        'reject_reason': 'evaluation_returned_none',
+                        'n_heavy_atoms': 0,
+                        'details': {}
+                    }
+                
+                result['lilly_medchem_passed'] = lilly_result.get('passed', False)
+                result['lilly_medchem_demerit'] = lilly_result.get('demerit', 0)
+                
+                if debug:
+                    print(f"    [数据设置] lilly_medchem_passed={result['lilly_medchem_passed']}, demerit={result['lilly_medchem_demerit']}")
+                
+                # 构建描述信息
+                description_parts = []
+                if not lilly_result.get('passed', False):
+                    # 如果未通过，优先显示拒绝原因
+                    reject_reason = lilly_result.get('reject_reason', '')
+                    if reject_reason:
+                        description_parts.append(f"拒绝原因: {reject_reason}")
+                matched_rules = lilly_result.get('matched_rules', [])
+                if matched_rules:
+                    description_parts.append(f"匹配规则: {', '.join(matched_rules)}")
+                demerit = lilly_result.get('demerit', 0)
+                if demerit > 0:
+                    demerit_cutoff = lilly_result.get('demerit_cutoff', 100)
+                    description_parts.append(f"扣分: {demerit}/{demerit_cutoff}")
+                n_heavy_atoms = lilly_result.get('n_heavy_atoms', 0)
+                if n_heavy_atoms > 0:
+                    description_parts.append(f"重原子数: {n_heavy_atoms}")
+                
+                result['lilly_medchem_description'] = '; '.join(description_parts) if description_parts else '通过'
+                
+                if debug:
+                    if lilly_result.get('passed', False):
+                        print(f"  ✅ Lilly Medchem Rules: 通过 (扣分={demerit}/{lilly_result.get('demerit_cutoff', 100)})")
+                        if matched_rules:
+                            print(f"     匹配规则: {', '.join(matched_rules)}")
+                    else:
+                        print(f"  ❌ Lilly Medchem Rules: 未通过 ({lilly_result.get('reject_reason', 'unknown')})")
+            except Exception as e:
+                # 异常时设置默认值
+                result['lilly_medchem_passed'] = False
+                result['lilly_medchem_demerit'] = 0
+                result['lilly_medchem_description'] = f'评估异常: {str(e)}'
+                if debug:
+                    print(f"  ⚠️  Lilly Medchem Rules评估失败: {e}")
+        else:
+            # mol为None时设置默认值
+            result['lilly_medchem_passed'] = False
+            result['lilly_medchem_demerit'] = 0
+            result['lilly_medchem_description'] = '分子对象为None'
             if debug:
-                if lilly_result['passed']:
-                    print(f"  ✅ Lilly Medchem Rules: 通过 (扣分={lilly_result['demerit']}/{lilly_result['demerit_cutoff']})")
-                    if lilly_result['matched_rules']:
-                        print(f"     匹配规则: {', '.join(lilly_result['matched_rules'])}")
-                else:
-                    print(f"  ❌ Lilly Medchem Rules: 未通过 ({lilly_result['reject_reason']})")
-        except Exception as e:
-            if debug:
-                print(f"  ⚠️  Lilly Medchem Rules评估失败: {e}")
+                print(f"  ⚠️  Lilly Medchem Rules评估跳过: mol为None")
         
         # 2. 生成SMILES
         try:
@@ -1001,7 +1035,7 @@ def _evaluate_single_molecule_worker(args_tuple):
         
         # 解包参数
         (mol_pickle_path, ligand_filename, protein_root, exhaustiveness, n_poses,
-         size_factor, buffer, tmp_dir, mol_idx) = args_tuple
+         size_factor, buffer, tmp_dir, mol_idx, debug) = args_tuple
         
         # 加载分子对象
         try:
@@ -1054,7 +1088,7 @@ def _evaluate_single_molecule_worker(args_tuple):
             n_poses=n_poses,
             size_factor=size_factor,
             buffer=buffer,
-            debug=False,  # 子进程中不输出调试信息
+            debug=debug,  # 使用传递的debug参数
             tmp_dir=tmp_dir
         )
         
@@ -1142,7 +1176,8 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
             size_factor,
             buffer,
             tmp_dir,
-            mol_idx if mol_idx is not None else -1
+            mol_idx if mol_idx is not None else -1,
+            debug  # 传递debug参数
         )
         
         # 使用进程池执行（每个分子一个进程）
@@ -1207,6 +1242,9 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                         'conformer_energy': None,
                         'tpsa': None,
                         'rdkit_valid': None,
+                        'lilly_medchem_passed': None,
+                        'lilly_medchem_demerit': None,
+                        'lilly_medchem_description': None,
                     }
                     break
                 
@@ -1214,6 +1252,10 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                 if async_result.ready():
                     try:
                         result = async_result.get(timeout=0.5)  # 快速获取结果
+                        # 调试输出：检查返回结果中是否包含lilly_medchem字段
+                        if debug and result:
+                            print(f"    [子进程返回] 包含lilly_medchem_passed: {'lilly_medchem_passed' in result}, "
+                                  f"值={result.get('lilly_medchem_passed', 'NOT_FOUND')}")
                         break
                     except Exception as e:
                         result = {
@@ -1240,6 +1282,9 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                             'conformer_energy': None,
                             'tpsa': None,
                             'rdkit_valid': None,
+                            'lilly_medchem_passed': None,
+                            'lilly_medchem_demerit': None,
+                            'lilly_medchem_description': None,
                         }
                         break
                 
@@ -1279,6 +1324,9 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                 'conformer_energy': None,
                 'tpsa': None,
                 'rdkit_valid': None,
+                'lilly_medchem_passed': None,
+                'lilly_medchem_demerit': None,
+                'lilly_medchem_description': None,
             }
         except Exception as e:
             result = {
@@ -1305,6 +1353,9 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                 'conformer_energy': None,
                 'tpsa': None,
                 'rdkit_valid': None,
+                'lilly_medchem_passed': None,
+                'lilly_medchem_demerit': None,
+                'lilly_medchem_description': None,
             }
         finally:
             # 确保清理进程池
@@ -1325,6 +1376,16 @@ def evaluate_single_molecule_isolated(mol, ligand_filename, protein_root,
                     result['mol'] = pickle.load(f)
             except:
                 result['mol'] = mol  # 如果加载失败，使用原始分子
+        
+        # 调试输出：检查返回结果中是否包含lilly_medchem字段
+        if debug and result:
+            lilly_passed = result.get('lilly_medchem_passed', 'NOT_FOUND')
+            lilly_demerit = result.get('lilly_medchem_demerit', 'NOT_FOUND')
+            lilly_desc = result.get('lilly_medchem_description', 'NOT_FOUND')
+            print(f"    [返回结果检查] mol_idx={result.get('mol_idx')}, "
+                  f"lilly_medchem_passed={lilly_passed} (type={type(lilly_passed).__name__}), "
+                  f"lilly_medchem_demerit={lilly_demerit} (type={type(lilly_demerit).__name__}), "
+                  f"lilly_medchem_description存在={lilly_desc != 'NOT_FOUND'}")
         
         return result
         
@@ -1779,6 +1840,9 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                     'conformer_energy': None,
                     'tpsa': None,
                     'rdkit_valid': None,
+                    'lilly_medchem_passed': None,
+                    'lilly_medchem_demerit': None,
+                    'lilly_medchem_description': None,
                     'comprehensive_score': None,
                     'molecule_id': None,
                 }
@@ -2016,6 +2080,9 @@ def evaluate_pt_file(pt_path, protein_root, output_dir=None,
                 'conformer_energy': eval_result.get('conformer_energy'),
                 'tpsa': eval_result.get('tpsa'),
                 'rdkit_valid': eval_result.get('rdkit_valid'),
+                'lilly_medchem_passed': eval_result.get('lilly_medchem_passed'),
+                'lilly_medchem_demerit': eval_result.get('lilly_medchem_demerit'),
+                'lilly_medchem_description': eval_result.get('lilly_medchem_description'),
             })
             
             # 每16个分子保存一次中间结果（防止丢失太多数据）
@@ -2563,7 +2630,7 @@ def record_evaluation_results_to_excel(results, output_dir, pt_file, ligand_file
     
     # 准备数据（只记录成功重建的分子，避免数据质量下降）
     records = []
-    for result in results:
+    for idx, result in enumerate(results):
         # 跳过重建失败的分子（mol为None）
         if result.get('mol') is None:
             continue
@@ -2595,6 +2662,7 @@ def record_evaluation_results_to_excel(results, output_dir, pt_file, ligand_file
         # 获取分子信息
         smiles = result.get('smiles', 'N/A')
         mol_idx = result.get('mol_idx', 'N/A')
+        molecule_id = result.get('molecule_id', 'N/A')
         
         # 获取化学性质指标
         chem = result.get('chem', {})
@@ -2635,9 +2703,28 @@ def record_evaluation_results_to_excel(results, output_dir, pt_file, ligand_file
         rmsd_median = rdkit_rmsd.get('median', 'N/A') if rdkit_rmsd else 'N/A'
         conformer_energy = result.get('conformer_energy', 'N/A')
         
+        # Lilly Medchem Rules评估结果
+        # 处理None值，确保正确显示
+        lilly_medchem_passed_raw = result.get('lilly_medchem_passed', None)
+        lilly_medchem_demerit_raw = result.get('lilly_medchem_demerit', None)
+        lilly_medchem_description_raw = result.get('lilly_medchem_description', None)
+        
+        # 如果值为None，转换为'N/A'；否则使用原值
+        # 注意：布尔值False应该保留，只有None才转换为'N/A'
+        lilly_medchem_passed = 'N/A' if lilly_medchem_passed_raw is None else lilly_medchem_passed_raw
+        lilly_medchem_demerit = 'N/A' if lilly_medchem_demerit_raw is None else lilly_medchem_demerit_raw
+        lilly_medchem_description = 'N/A' if lilly_medchem_description_raw is None else lilly_medchem_description_raw
+        
+        # 调试输出：检查前3个分子的数据传递情况
+        if idx < 3:
+            print(f"    [Excel记录调试] 分子{idx+1}: lilly_medchem_passed={lilly_medchem_passed_raw} -> {lilly_medchem_passed}, "
+                  f"demerit={lilly_medchem_demerit_raw} -> {lilly_medchem_demerit}, "
+                  f"description存在={lilly_medchem_description_raw is not None}")
+        
         # 构建记录（包含三种vina模式和分子结构指标）
         record = {
             '分子ID': mol_idx,
+            '分子身份证': molecule_id,
             'SMILES': smiles,
             'Vina_Dock_亲和力': vina_dock_affinity,
             'Vina_Dock_RMSD下界': vina_dock_rmsd_lb,
@@ -2665,6 +2752,9 @@ def record_evaluation_results_to_excel(results, output_dir, pt_file, ligand_file
             'RDKit_RMSD_最小': rmsd_min,
             'RDKit_RMSD_中位数': rmsd_median,
             '构象能量': conformer_energy,
+            'Lilly_Medchem_通过': lilly_medchem_passed,
+            'Lilly_Medchem_扣分': lilly_medchem_demerit,
+            'Lilly_Medchem_描述': lilly_medchem_description,
             '原始PT文件': os.path.basename(pt_file),
             '配体文件': os.path.basename(ligand_filename) if ligand_filename else 'N/A',
             '原子编码模式': atom_mode,
@@ -2712,10 +2802,40 @@ def record_evaluation_results_to_excel(results, output_dir, pt_file, ligand_file
         df_sorted['Vina_Dock_亲和力'] = df_sorted['Vina_Dock_亲和力'].replace('N/A', np.nan)
         df = df_sorted.sort_values('Vina_Dock_亲和力', na_position='last')
     
+    # 筛选正常分子（剔除vina三个参数大于0的异常分子）
+    def is_valid_molecule(row):
+        """判断分子是否正常（vina三个参数都不大于0）"""
+        vina_dock = row.get('Vina_Dock_亲和力', 'N/A')
+        vina_score = row.get('Vina_ScoreOnly_亲和力', 'N/A')
+        vina_min = row.get('Vina_Minimize_亲和力', 'N/A')
+        
+        # 检查是否为异常数据（vinadock>0、vinascore>0或vinamin>0）
+        try:
+            if vina_dock not in ('N/A', None) and not pd.isna(vina_dock):
+                if float(vina_dock) > 0:
+                    return False
+            if vina_score not in ('N/A', None) and not pd.isna(vina_score):
+                if float(vina_score) > 0:
+                    return False
+            if vina_min not in ('N/A', None) and not pd.isna(vina_min):
+                if float(vina_min) > 0:
+                    return False
+        except (ValueError, TypeError):
+            # 如果无法转换，保留该分子（可能是N/A）
+            pass
+        
+        return True
+    
+    # 筛选正常分子
+    df_valid = df[df.apply(is_valid_molecule, axis=1)].copy()
+    
     try:
         # 保存到Excel
         with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='评估结果', index=False)
+            
+            # 添加正常分子表（剔除vina三个参数大于0的异常分子）
+            df_valid.to_excel(writer, sheet_name='正常分子', index=False)
             
             # 添加统计信息工作表
             if len(records) > 0:
