@@ -258,10 +258,7 @@ def main():
         print("可能没有变更需要提交")
         return
     
-    # 创建本地备份（在推送之前）
-    create_local_backup()
-    
-    # 推送到 GitHub
+    # 推送到 GitHub（不创建本地备份）
     print()
     print("推送到 GitHub...")
     print("-" * 50)
